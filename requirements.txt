@@ -1,0 +1,11 @@
+langchain
+langchain-openai
+langchain-nvidia-ai-endpoints
+langchain-milvus>=0.2
+langchain-community
+langchain-text-splitters
+langgraph
+pymilvus>=2.5,<2.6
+python-dotenv
+langchain-mcp-adapters
+requests
