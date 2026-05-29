@@ -8,6 +8,8 @@ chat.py — 對話迴圈與串流輸出模組
 特別是 Reflect 節點觸發重新規劃時的回饋迴圈。
 """
 
+from langchain_core.messages import HumanMessage
+
 from prompt import read_query
 from state import TravelState
 
@@ -123,7 +125,6 @@ async def chat_loop(graph):
     並以 stream_mode="updates" 逐節點顯示執行進度。
     """
     config = {"configurable": {"thread_id": "travel-session-1"}}
-    chat_history = ""
 
     print("\n" + "="*60)
     print("  個人化旅遊規劃 Agentic AI（LangGraph）")
@@ -140,10 +141,10 @@ async def chat_loop(graph):
         if not user_input:
             continue
 
-        # 初始化 State
+        # 本輪輸入：只塞新的 HumanMessage（由 add_messages reducer 自動 append
+        # 到既有 messages），並重置所有 transient 欄位，避免上一輪殘留干擾本輪。
         input_state: TravelState = {
-            "user_query": user_input,
-            "chat_history": chat_history,
+            "messages": [HumanMessage(content=user_input)],
             "plan": "",
             "preferences": "",
             "external_info": "",
@@ -182,7 +183,5 @@ async def chat_loop(graph):
                     else:
                         print_node_output(node_name, output)
 
-        # 取得最終結果，更新對話記錄
-        final_state = await graph.aget_state(config)
-        final_response = final_state.values.get("final_response", "")
-        chat_history += f"\n使用者：{user_input}\n助理：{final_response}\n"
+        # 對話記錄已由 add_messages reducer + MemorySaver checkpointer 自動保存，
+        # 下一輪只要丟新的 HumanMessage 進來，過往訊息自然會被帶入。

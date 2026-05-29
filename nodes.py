@@ -14,9 +14,36 @@ nodes.py — StateGraph 節點函式模組
 """
 
 from datetime import datetime
-from langchain_core.messages import SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from state import TravelState
 from rag import build_preference_query
+
+
+def _get_user_query(messages: list[BaseMessage]) -> str:
+    """取出最新一則使用者輸入，作為本輪的 user_query。"""
+    for msg in reversed(messages):
+        if isinstance(msg, HumanMessage):
+            return msg.content
+    return ""
+
+
+def _format_history(messages: list[BaseMessage]) -> str:
+    """將過往對話訊息整理成可塞進 prompt 的字串，排除最新一輪使用者輸入。"""
+    if len(messages) <= 1:
+        return "無"
+    lines = []
+    for msg in messages[:-1]:
+        if isinstance(msg, HumanMessage):
+            lines.append(f"使用者：{msg.content}")
+        elif isinstance(msg, AIMessage) and msg.content:
+            lines.append(f"助理：{msg.content}")
+    return "\n".join(lines) if lines else "無"
 
 
 # ──────────────────────────────────────────────
@@ -31,26 +58,28 @@ PLAN_SYSTEM_PROMPT = """你是一位旅遊規劃的任務分析師。
 SEARCH_SYSTEM_PROMPT = """你是一位旅遊資訊蒐集助理。
 你的任務只負責蒐集外部資料，不負責規劃每日行程。
 請根據使用者的旅遊需求，使用可用工具蒐集以下資訊：
-1. 使用 tavily_search 搜尋目的地的景點、古蹟、美食、住宿、交通等旅遊資訊（至少搜尋 2 次，每次只查一個主題）
-2. 使用天氣查詢工具查詢旅行期間的天氣預報。若旅行日期超出預設預報範圍，請主動帶入 start_date / end_date 參數重試
-3. 使用 Frankfurter MCP 的 convert 或 get_rates 查詢台幣兌換當地貨幣的匯率；必要時先用 list_currencies 確認可用貨幣代碼
+1. 使用 tavily_search 搜尋目的地的景點、美食、住宿、交通（最多 3 次搜尋，每次主題不同）
+2. 使用天氣查詢工具查詢旅行期間天氣預報；超出預設範圍時帶入 start_date / end_date 重試
+3. 使用 Frankfurter MCP 的 convert 查詢匯率
 
-請依序完成查詢，並將所有結果整理為外部資訊摘要，固定包含以下小節（用純文字標題即可）：
-景點/古蹟資訊
+請將所有結果整理為精簡摘要，固定包含以下小節：
+景點資訊
 天氣資訊
 匯率資訊
 交通資訊
-住宿候選資訊
-查詢不足或失敗
+住宿候選
 
-輸出格式要求：
-- 全程純文字，禁止任何 markdown 語法
-- 禁止使用：# ## ### 標題符號、**粗體**、*斜體*、`程式碼`、表格、---- 分隔線、> 引言、emoji
-- 條列請用「・」或「1. 2. 3.」開頭，不要用「-」「*」
-- 章節標題直接寫文字並換行，不要加任何符號裝飾
+摘要規則：
+- 整體控制在 800 字以內
+- 每個景點/飯店一行：名稱、價格/門票、地鐵站、一句特色
+  範例：・大阪城天守閣 1,200日圓 谷町四丁目站 日本三大名城
+- 天氣只列日期、最高/最低溫、降雨機率、雨量，不要長篇敘述
+- 匯率一行寫完
+- 禁止寫景點歷史背景、文化典故、行程建議
+- 禁止任何 markdown 語法（# ** > 表格 ---- emoji 等）
+- 條列用「・」或「1. 2. 3.」開頭
 
-禁止輸出完整三天行程、Day 1/Day 2/Day 3 每日排程、總預算結論或最終旅遊建議。
-這些內容留給 Generate 節點處理。
+禁止輸出完整三天行程、Day 1/Day 2/Day 3 排程、總預算或最終建議——留給 Generate 節點。
 工具查詢完成後一定要輸出文字摘要，不可以回覆空白。"""
 
 GENERATE_SYSTEM_PROMPT = """你是一位專業的個人化旅遊規劃助理。
@@ -76,11 +105,13 @@ GENERATE_SYSTEM_PROMPT = """你是一位專業的個人化旅遊規劃助理。
 - 費用以實際匯率換算
 
 輸出長度限制：
-- 整體控制在 1800 字以內
-- 偏好分析三段式：每段「原文依據」「推理結果」「行程影響」各限 1 句話
-- 每日行程每個時段（上午/午餐/下午/晚上）以 2 句話內描述完畢，不要長篇說明
-- 預算、住宿、交通、注意事項合計不超過 400 字
-- 不要重複資訊（例如門票費用已列在景點段就不要再列在預算段細項）"""
+- 整體控制在 1000 字以內
+- 偏好分析最多 3 段，每段「原文依據／推理結果／行程影響」合起來 1-2 句話即可
+- 每日行程用條列式：每行格式「時間 景點（費用）交通」一行寫完，不要長篇說明
+  範例：・09:00 大阪城天守閣（1,200日圓）地鐵谷町四丁目站步行10分
+- 預算、住宿、交通、注意事項合計不超過 200 字
+- 不要重複資訊（門票寫了景點段就別重複預算段細項）
+- 禁止寫景點歷史背景、典故、文化說明，只列實用資訊"""
 
 REFLECT_SYSTEM_PROMPT = """你是一位嚴謹的旅遊行程審核員。
 請客觀評估行程草案的可行性，重點檢查以下項目：
@@ -123,11 +154,13 @@ def create_nodes(llm, retriever, tools):
     # 節點 1：Plan（任務拆解）
     # ──────────────────────────────────────────
     async def plan_node(state: TravelState) -> dict:
+        user_query = _get_user_query(state["messages"])
+        history = _format_history(state["messages"])
         messages = [
             SystemMessage(content=PLAN_SYSTEM_PROMPT),
             HumanMessage(content=(
-                f"[對話記錄]\n{state['chat_history'] or '無'}\n\n"
-                f"[本次使用者旅遊需求]\n{state['user_query']}"
+                f"[對話記錄]\n{history}\n\n"
+                f"[本次使用者旅遊需求]\n{user_query}"
             )),
         ]
         chunks = []
@@ -139,7 +172,8 @@ def create_nodes(llm, retriever, tools):
     # 節點 2：Retrieve（偏好檢索）
     # ──────────────────────────────────────────
     async def retrieve_node(state: TravelState) -> dict:
-        query = build_preference_query(state["user_query"])
+        user_query = _get_user_query(state["messages"])
+        query = build_preference_query(user_query)
         docs = retriever.invoke(query)
         preferences = "\n\n".join(doc.page_content for doc in docs)
         return {"preferences": preferences}
@@ -152,13 +186,15 @@ def create_nodes(llm, retriever, tools):
         tool_results = []
         today = datetime.now().strftime("%Y-%m-%d")
 
+        user_query = _get_user_query(state["messages"])
+        history = _format_history(state["messages"])
         messages = [
             SystemMessage(content=SEARCH_SYSTEM_PROMPT),
             HumanMessage(
                 content=(
                     f"今日日期：{today}\n"
-                    f"[對話記錄]\n{state['chat_history'] or '無'}\n\n"
-                    f"[本次使用者旅遊需求]\n{state['user_query']}\n"
+                    f"[對話記錄]\n{history}\n\n"
+                    f"[本次使用者旅遊需求]\n{user_query}\n"
                     f"[任務計畫]\n{state['plan']}"
                 )
             ),
@@ -207,21 +243,33 @@ def create_nodes(llm, retriever, tools):
     # ──────────────────────────────────────────
     async def generate_node(state: TravelState) -> dict:
         today = datetime.now().strftime("%Y-%m-%d")
+        user_query = _get_user_query(state["messages"])
+        history = _format_history(state["messages"])
 
-        # 如果是重新規劃，附上前次反思意見
-        revision_note = (
-            f"\n\n[前次評估意見（請針對以下問題修正）]\n{state['reflection']}"
-            if state["reflection"] else ""
-        )
-
-        prompt = (
-            f"[今日日期：{today}]\n\n"
-            f"[使用者旅遊需求]\n{state['user_query']}\n\n"
-            f"[對話記錄]\n{state['chat_history'] or '無'}\n\n"
-            f"[使用者旅遊偏好（來自過往旅遊紀錄）]\n{state['preferences']}\n\n"
-            f"[即時資訊（景點、天氣、匯率）]\n{state['external_info']}"
-            f"{revision_note}"
-        )
+        # 如果是重新規劃，把 reflection 放在最前面、最顯眼
+        if state["reflection"]:
+            prompt = (
+                f"[!!!重要：這是第 {state['revision_count']} 次修正，必須處理以下問題]\n"
+                f"{state['reflection']}\n\n"
+                f"修正規則：\n"
+                f"・上述每一項問題都必須在新行程中明確處理（修正數字、改地點、補備案等）\n"
+                f"・修正後在「修正摘要」段落逐項說明：「問題X：原本→改成」\n"
+                f"・不要只是改寫文字而保留同樣數字或同樣安排\n\n"
+                f"────────────────\n\n"
+                f"[今日日期：{today}]\n\n"
+                f"[使用者旅遊需求]\n{user_query}\n\n"
+                f"[對話記錄]\n{history}\n\n"
+                f"[使用者旅遊偏好]\n{state['preferences']}\n\n"
+                f"[即時資訊]\n{state['external_info']}"
+            )
+        else:
+            prompt = (
+                f"[今日日期：{today}]\n\n"
+                f"[使用者旅遊需求]\n{user_query}\n\n"
+                f"[對話記錄]\n{history}\n\n"
+                f"[使用者旅遊偏好（來自過往旅遊紀錄）]\n{state['preferences']}\n\n"
+                f"[即時資訊（景點、天氣、匯率）]\n{state['external_info']}"
+            )
 
         messages = [
             SystemMessage(content=GENERATE_SYSTEM_PROMPT),
@@ -237,9 +285,10 @@ def create_nodes(llm, retriever, tools):
     # 節點 5：Reflect（可行性評估）
     # ──────────────────────────────────────────
     async def reflect_node(state: TravelState) -> dict:
+        user_query = _get_user_query(state["messages"])
         prompt = (
             f"[行程草案]\n{state['draft_itinerary']}\n\n"
-            f"[使用者原始需求]\n{state['user_query']}\n\n"
+            f"[使用者原始需求]\n{user_query}\n\n"
             f"[即時資訊（天氣與匯率）]\n{state['external_info']}"
         )
 
@@ -263,7 +312,11 @@ def create_nodes(llm, retriever, tools):
     # 節點 6：Respond（回覆使用者）
     # ──────────────────────────────────────────
     async def respond_node(state: TravelState) -> dict:
-        return {"final_response": state["draft_itinerary"]}
+        final = state["draft_itinerary"]
+        return {
+            "final_response": final,
+            "messages": [AIMessage(content=final)],
+        }
 
     # 回傳所有節點
     return {
