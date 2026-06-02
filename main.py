@@ -12,8 +12,14 @@ main.py — 主程式入口
 
 import os
 import asyncio
+import warnings
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
+
+# 靜音 with_structured_output(BrainDecision) 觸發的無害序列化警告。
+# 根源是 LangChain 內部 parsed 欄位型別不符 + Pydantic 2.12 檢查變嚴格（issue #35538），
+# 不影響 brain 決策正確性；待 langchain-core 修好後可移除此行。
+warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
 
 from rag import build_retriever
 from tools import get_all_tools

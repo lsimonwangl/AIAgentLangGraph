@@ -1,11 +1,9 @@
 """
 chat.py — 對話迴圈與串流輸出模組
 
-對應 Lab1 Dify 的直接回覆節點與 Lab2 的 chat.py。
-
-相較於 Lab2 直接串流 Agent 的回答，Lab4 改為逐節點顯示執行狀態，
-讓使用者清楚看到 StateGraph 各節點的執行順序與產出，
-特別是 Reflect 節點觸發重新規劃時的回饋迴圈。
+升級為 Agentic 架構後，新增 Brain 節點的決策顯示：
+每次 brain 跑完都會印出「決策：執行 X 動作（理由：Y）」，
+讓使用者看到 agent 的思考軌跡，而不是只有節點輸出。
 """
 
 from langchain_core.messages import HumanMessage
@@ -15,7 +13,7 @@ from state import TravelState
 
 # 節點名稱對應的中文標題
 NODE_TITLES = {
-    "plan": "Plan — 任務拆解",
+    "brain": "Brain — 下一步決策",
     "retrieve": "Retrieve — 偏好檢索",
     "search": "Search — 資訊蒐集",
     "generate": "Generate — 行程生成",
@@ -49,14 +47,7 @@ def print_node_output(node_name: str, output: dict):
     print(f"  {title}")
     print(f"{'='*60}")
 
-    if node_name == "plan":
-        print_state_field(
-            "plan",
-            "Plan 節點產生的任務拆解，供後續 Search 節點決定要查什麼。",
-            output.get("plan", ""),
-        )
-
-    elif node_name == "retrieve":
+    if node_name == "retrieve":
         prefs = output.get("preferences", "")
         line_count = prefs.count("\n") + 1
         print(f"檢索摘要：從 Milvus 知識庫檢索到 {line_count} 行偏好資料（共 {len(prefs)} 字元）")
@@ -84,29 +75,6 @@ def print_node_output(node_name: str, output: dict):
             output.get("draft_itinerary", ""),
         )
 
-    elif node_name == "reflect":
-        is_feasible = output.get("is_feasible", False)
-        count = output.get("revision_count", 0)
-        print_state_field(
-            "is_feasible",
-            "Reflect 節點判斷行程是否通過可行性評估。",
-            is_feasible,
-            max_chars=200,
-        )
-        print()
-        print_state_field(
-            "revision_count",
-            "Reflect 節點累計已評估幾次，用來避免無限修正。",
-            count,
-            max_chars=200,
-        )
-        print()
-        print_state_field(
-            "reflection",
-            "Reflect 節點對行程草案的審核意見；第一行 PASS/REVISE 會影響下一個節點。",
-            output.get("reflection", ""),
-        )
-
     elif node_name == "respond":
         print_state_field(
             "final_response",
@@ -115,14 +83,21 @@ def print_node_output(node_name: str, output: dict):
             max_chars=2400,
         )
 
+    elif node_name == "brain":
+        action = output.get("next_action", "")
+        reasoning = output.get("brain_reasoning", "")
+        step = output.get("step_count", 0)
+        print(f"步驟 #{step}：決定執行 [{action}]")
+        print(f"理由：{reasoning}")
+
 
 async def chat_loop(graph):
     """
     啟動多輪對話迴圈。
 
-    每輪接收使用者輸入，透過 StateGraph 完整執行
-    Plan → Retrieve → Search → Generate → Reflect → Respond 流程，
-    並以 stream_mode="updates" 逐節點顯示執行進度。
+    每輪接收使用者輸入，交給 StateGraph 執行：由 brain 動態決定
+    Retrieve / Search / Generate / Reflect 的執行順序，最後 Respond 回覆，
+    並以 stream 逐節點顯示執行進度與 brain 的決策軌跡。
     """
     config = {"configurable": {"thread_id": "travel-session-1"}}
 
@@ -145,18 +120,20 @@ async def chat_loop(graph):
         # 到既有 messages），並重置所有 transient 欄位，避免上一輪殘留干擾本輪。
         input_state: TravelState = {
             "messages": [HumanMessage(content=user_input)],
-            "plan": "",
             "preferences": "",
             "external_info": "",
             "draft_itinerary": "",
             "reflection": "",
-            "is_feasible": False,
             "revision_count": 0,
             "final_response": "",
+            # Brain 控制欄位：每輪重置，由 brain 自己累積
+            "next_action": "",
+            "brain_reasoning": "",
+            "step_count": 0,
         }
 
         # 逐節點執行：LLM 節點以 token 即時顯示，非 LLM 節點顯示完整輸出
-        streaming_nodes = {"plan", "search", "generate", "reflect"}
+        streaming_nodes = {"search", "generate", "reflect"}
         current_stream_node = None
         async for mode, payload in graph.astream(
             input_state, config, stream_mode=["updates", "messages"]
@@ -173,12 +150,10 @@ async def chat_loop(graph):
             else:  # mode == "updates"
                 for node_name, output in payload.items():
                     if node_name in streaming_nodes:
-                        # 內容已串流完，補印附屬欄位（reflect 的 is_feasible / revision_count）
+                        # 內容已串流完，reflect 補印評估結果（PASS / REVISE / RESEARCH）
                         if node_name == "reflect":
-                            print(
-                                f"\n\n[is_feasible] {output.get('is_feasible')}"
-                                f"  [revision_count] {output.get('revision_count')}"
-                            )
+                            verdict = output.get("reflection", "").strip().split("\n")[0][:20]
+                            print(f"\n\n[評估結果] {verdict}")
                         current_stream_node = None
                     else:
                         print_node_output(node_name, output)
