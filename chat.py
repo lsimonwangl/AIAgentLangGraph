@@ -1,187 +1,153 @@
-"""
-chat.py — 對話迴圈與串流輸出模組
+# ============================================================
+# chat.py — 對話迴圈、串流顯示與 interrupt 暫停/resume
+# ============================================================
+# 逐節點顯示 StateGraph 執行進度（Planner → Executor → Reflect），
+# 並保留通用的 interrupt 處理：節點若觸發 interrupt 則暫停 → 終端反問 → Command(resume) 續跑
+# （目前無節點觸發，為保留 human-in-the-loop 能力的基礎設施）。
+# 串流用 stream_mode=["updates","messages"] + subgraphs=True：
+#   - messages：即時 token（planner 計畫、executor 行程草案）
+#   - updates ：節點產出的 state 欄位（plan / critique），與子圖工具呼叫
+# ============================================================
 
-對應 Lab1 Dify 的直接回覆節點與 Lab2 的 chat.py。
-
-相較於 Lab2 直接串流 Agent 的回答，Lab4 改為逐節點顯示執行狀態，
-讓使用者清楚看到 StateGraph 各節點的執行順序與產出，
-特別是 Reflect 節點觸發重新規劃時的回饋迴圈。
-"""
-
-from langchain_core.messages import HumanMessage
-
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 from prompt import read_query
-from state import TravelState
-
-# 節點名稱對應的中文標題
-NODE_TITLES = {
-    "plan": "Plan — 任務拆解",
-    "retrieve": "Retrieve — 偏好檢索",
-    "search": "Search — 資訊蒐集",
-    "generate": "Generate — 行程生成",
-    "reflect": "Reflect — 可行性評估",
-    "respond": "Respond — 回覆使用者",
-}
 
 
-def preview_text(text: str, max_chars: int = 1200) -> str:
-    """回傳適合終端機顯示的內容預覽，避免長文字刷滿畫面。"""
-    text = text.strip()
+# ===================== 顯示小工具 =====================
+def preview_text(text: str, max_chars: int = 400) -> str:
+    text = str(text).strip()
     if not text:
         return "（空）"
     if len(text) <= max_chars:
         return text
-    return f"{text[:max_chars].rstrip()}\n\n...（已截斷，完整內容共 {len(text)} 字元）"
+    return f"{text[:max_chars].rstrip()}...（共 {len(text)} 字元）"
 
 
-def print_state_field(field_name: str, description: str, value, max_chars: int = 1200):
-    """以教學模式顯示節點輸出的 State 欄位。"""
-    print(f"輸出欄位：state[\"{field_name}\"]")
-    print(f"欄位用途：{description}")
-    print("內容預覽：")
-    print(preview_text(str(value), max_chars=max_chars))
+def print_header(title: str):
+    print(f"\n{'=' * 60}\n  {title}\n{'=' * 60}")
 
 
-def print_node_output(node_name: str, output: dict):
-    """根據節點類型，格式化並印出對應的執行結果"""
-    title = NODE_TITLES.get(node_name, node_name)
-    print(f"\n{'='*60}")
-    print(f"  {title}")
-    print(f"{'='*60}")
-
-    if node_name == "plan":
-        print_state_field(
-            "plan",
-            "Plan 節點產生的任務拆解，供後續 Search 節點決定要查什麼。",
-            output.get("plan", ""),
-        )
-
-    elif node_name == "retrieve":
-        prefs = output.get("preferences", "")
-        line_count = prefs.count("\n") + 1
-        print(f"檢索摘要：從 Milvus 知識庫檢索到 {line_count} 行偏好資料（共 {len(prefs)} 字元）")
-        print()
-        print_state_field(
-            "preferences",
-            "Retrieve 節點從 RAG 知識庫找出的使用者過往旅遊偏好。",
-            prefs,
-        )
-
-    elif node_name == "search":
-        info = output.get("external_info", "")
-        print(f"蒐集摘要：已蒐集 {len(info)} 字元的外部資訊（景點、天氣、匯率）")
-        print()
-        print_state_field(
-            "external_info",
-            "Search 節點透過 MCP tools 蒐集到的即時外部資訊。",
-            info,
-        )
-
-    elif node_name == "generate":
-        print_state_field(
-            "draft_itinerary",
-            "Generate 節點根據使用者偏好與外部資訊產生的行程草案。",
-            output.get("draft_itinerary", ""),
-        )
-
-    elif node_name == "reflect":
-        is_feasible = output.get("is_feasible", False)
-        count = output.get("revision_count", 0)
-        print_state_field(
-            "is_feasible",
-            "Reflect 節點判斷行程是否通過可行性評估。",
-            is_feasible,
-            max_chars=200,
-        )
-        print()
-        print_state_field(
-            "revision_count",
-            "Reflect 節點累計已評估幾次，用來避免無限修正。",
-            count,
-            max_chars=200,
-        )
-        print()
-        print_state_field(
-            "reflection",
-            "Reflect 節點對行程草案的審核意見；第一行 PASS/REVISE 會影響下一個節點。",
-            output.get("reflection", ""),
-        )
-
-    elif node_name == "respond":
-        print_state_field(
-            "final_response",
-            "Respond 節點最後回覆給使用者的內容。",
-            output.get("final_response", ""),
-            max_chars=2400,
-        )
+# 串流中目前的標題（避免同一節點重複印 header）
+_HEADERS = {
+    "planner": "Planner — 規劃 / 修訂計畫",
+    "executor": "Executor — 執行與生成（ReAct）",
+}
 
 
+# ===================== 子圖工具呼叫顯示 =====================
+# executor 是 create_agent 子圖，其工具呼叫/結果走 subgraph 的 updates。
+def _print_tool_activity(node_output: dict):
+    for value in node_output.values():
+        for msg in value.get("messages", []) if isinstance(value, dict) else []:
+            if isinstance(msg, AIMessage) and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    print(f"\n[Tool Call] {tc['name']}")
+                    print(f"  參數：{preview_text(tc['args'], 120)}")
+            elif isinstance(msg, ToolMessage):
+                print(f"  結果：{preview_text(msg.content, 150)}", flush=True)
+
+
+# ===================== 串流事件處理 =====================
+def _handle_event(ns, mode, data, st: dict):
+    # ── 子圖（executor 內部）事件 ──
+    if ns:
+        if mode == "messages":
+            chunk, _meta = data
+            # 只串流 LLM 的推理/行程文字；工具回傳的 ToolMessage 內容不在此原文倒出，
+            # 改由 _print_tool_activity 印截斷後的「結果：」即可。
+            if chunk.content and not isinstance(chunk, ToolMessage):
+                if st["header"] != "executor":
+                    print_header(_HEADERS["executor"])
+                    st["header"] = "executor"
+                print(chunk.content, end="", flush=True)
+        elif mode == "updates":
+            _print_tool_activity(data)
+        return
+
+    # ── 頂層事件 ──
+    if mode == "messages":
+        chunk, meta = data
+        node = meta.get("langgraph_node")
+        if node == "planner" and chunk.content:
+            if st["header"] != "planner":
+                print_header(_HEADERS["planner"])
+                st["header"] = "planner"
+            print(chunk.content, end="", flush=True)
+        return
+
+    # mode == "updates"
+    for node_name, output in data.items():
+        if node_name == "__interrupt__":
+            continue  # interrupt 由外層 get_state 統一處理
+        if node_name == "planner":
+            plan = output.get("plan", [])
+            print('\n\n輸出欄位：state["plan"]（可修改的計畫物件）')
+            for i, step in enumerate(plan, 1):
+                print(f"  {i}. {step}")
+            st["header"] = None
+        elif node_name == "executor":
+            st["header"] = None  # 行程草案已串流完
+        elif node_name == "reflect":
+            critique = output.get("critique")
+            count = output.get("revisions", 0)
+            print_header("Reflect — 多面向品質檢查")
+            print('輸出欄位：state["critique"]（structured output）')
+            print(f"  verdict：{critique['verdict'] if critique else '?'}")
+            print(f"  revisions：{count}")
+            issues = critique["issues"] if critique else []
+            if issues:
+                print("  issues：")
+                for issue in issues:
+                    print(f"    ・{issue}")
+            st["header"] = None
+
+
+# ===================== 單輪執行（含 interrupt 迴圈） =====================
+# 串流狀態：跨事件記住目前 header，避免同一節點重複印標題
+_STREAM_STATE = {"header": None}
+
+
+async def _run_turn(graph, payload, config):
+    async for ns, mode, data in graph.astream(
+        payload, config, stream_mode=["updates", "messages"], subgraphs=True
+    ):
+        _handle_event(ns, mode, data, _STREAM_STATE)
+    snapshot = await graph.aget_state(config)
+    return snapshot.interrupts
+
+
+# ===================== 對話迴圈 =====================
 async def chat_loop(graph):
-    """
-    啟動多輪對話迴圈。
-
-    每輪接收使用者輸入，透過 StateGraph 完整執行
-    Plan → Retrieve → Search → Generate → Reflect → Respond 流程，
-    並以 stream_mode="updates" 逐節點顯示執行進度。
-    """
     config = {"configurable": {"thread_id": "travel-session-1"}}
 
-    print("\n" + "="*60)
-    print("  個人化旅遊規劃 Agentic AI（LangGraph）")
+    print_header("個人化旅遊規劃 Agentic AI（LangGraph）")
     print("  輸入旅遊需求開始規劃，輸入 quit 結束")
-    print("="*60)
 
     while True:
         user_input = read_query()
-
         if user_input.lower() == "quit":
             print("\n感謝使用，再見！")
             break
-
         if not user_input:
             continue
 
-        # 本輪輸入：只塞新的 HumanMessage（由 add_messages reducer 自動 append
-        # 到既有 messages），並重置所有 transient 欄位，避免上一輪殘留干擾本輪。
-        input_state: TravelState = {
+        # 本輪輸入：丟新的 HumanMessage（add_messages 自動 append），
+        # 並重置 transient 欄位，避免上一輪殘留干擾。
+        payload = {
             "messages": [HumanMessage(content=user_input)],
-            "plan": "",
-            "preferences": "",
-            "external_info": "",
-            "draft_itinerary": "",
-            "reflection": "",
-            "is_feasible": False,
-            "revision_count": 0,
-            "final_response": "",
+            "plan": [],
+            "critique": None,
+            "revisions": 0,
         }
 
-        # 逐節點執行：LLM 節點以 token 即時顯示，非 LLM 節點顯示完整輸出
-        streaming_nodes = {"plan", "search", "generate", "reflect"}
-        current_stream_node = None
-        async for mode, payload in graph.astream(
-            input_state, config, stream_mode=["updates", "messages"]
-        ):
-            if mode == "messages":
-                chunk, meta = payload
-                node = meta.get("langgraph_node")
-                if node not in streaming_nodes or not chunk.content:
-                    continue
-                if node != current_stream_node:
-                    print(f"\n{'='*60}\n  {NODE_TITLES.get(node, node)}\n{'='*60}")
-                    current_stream_node = node
-                print(chunk.content, end="", flush=True)
-            else:  # mode == "updates"
-                for node_name, output in payload.items():
-                    if node_name in streaming_nodes:
-                        # 內容已串流完，補印附屬欄位（reflect 的 is_feasible / revision_count）
-                        if node_name == "reflect":
-                            print(
-                                f"\n\n[is_feasible] {output.get('is_feasible')}"
-                                f"  [revision_count] {output.get('revision_count')}"
-                            )
-                        current_stream_node = None
-                    else:
-                        print_node_output(node_name, output)
+        # interrupt 迴圈：暫停就反問，取得回覆後 Command(resume) 續跑。
+        while True:
+            _STREAM_STATE["header"] = None
+            interrupts = await _run_turn(graph, payload, config)
+            if not interrupts:
+                break
+            answer = input(f"\n[需要補充資訊] {interrupts[0].value}\n> ").strip()
+            payload = Command(resume=answer)
 
-        # 對話記錄已由 add_messages reducer + MemorySaver checkpointer 自動保存，
-        # 下一輪只要丟新的 HumanMessage 進來，過往訊息自然會被帶入。
+        print("\n\n（本輪規劃完成）")
