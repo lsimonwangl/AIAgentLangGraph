@@ -11,7 +11,6 @@
 
 import os
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
@@ -42,45 +41,20 @@ def build_mcp_server_config() -> dict:
 
 
 # ===================== RAG → tool =====================
-# 兩段檢索 union：
-#   1) 固定 PREFERENCE_QUERY → 保證跨旅程的「通用好惡/心得」一定撈得到
-#      （像「太觀光化」這種貫穿所有旅程的特質，不會被單一主題擠掉）。
-#   2) LLM 把本次需求改寫成「去目的地、聚焦風格與好惡」的 query → 對齊這趟主題。
-# 改寫只停在中立層（主題＋好惡），不點名任何結論，偏好仍由模型讀原文後自行歸納。
-_REWRITE_PROMPT = """你是檢索查詢改寫器。請把使用者的旅遊需求，改寫成一段用來檢索「使用者過往旅行偏好」的查詢語句。
-規則：
-- 同時涵蓋兩塊：(a) 這趟旅程的主題與風格（如古蹟、文化、自然、放鬆、步調、住宿與餐飲取向）；
-  (b) 使用者對景點/住宿/行程的好惡與評價（覺得值得、推薦的，以及失望、踩雷、想避開的）。
-- 移除目的地的國名與城市名（如日本、大阪）——那些與過往國內紀錄語意不合，只會干擾檢索。
-- 不要預設或臆測使用者的具體好惡結論，只描述「要檢索哪些面向」。
-- 只輸出查詢語句本身，不要解釋。"""
-
-
-def build_retrieve_tool(retriever, llm):
-    def _dedup(docs):
-        seen, uniq = set(), []
-        for d in docs:
-            if d.page_content not in seen:
-                seen.add(d.page_content)
-                uniq.append(d)
-        return uniq
-
+# 由 executor（ReAct agent）自主驅動檢索：它自己決定要查哪個偏好面向、不夠就換詞再查。
+# 工具直接拿 agent 給的 query 去向量檢索（query 空才用 PREFERENCE_QUERY 當廣撈預設），
+# 不做改寫、不做 union——「決定查什麼」的智能放在 agent 身上。
+def build_retrieve_tool(retriever):
     @tool
-    async def retrieve_preferences(query: str = "") -> str:
-        """檢索使用者過往旅遊紀錄，推斷其旅行偏好（景點類型、住宿、預算分配、飲食與交通習慣、好惡與雷點）。規劃行程前先呼叫一次以對齊使用者風格。query 直接傳本次旅遊需求即可，工具會自行整理成偏好檢索語句。"""
-        # 1) 用 LLM 把需求改寫成去目的地、聚焦風格與好惡的檢索語句
-        themed_query = ""
-        if query.strip():
-            resp = await llm.ainvoke([
-                SystemMessage(content=_REWRITE_PROMPT),
-                HumanMessage(content=query),
-            ])
-            themed_query = resp.content.strip()
-        # 2) 兩段檢索 union（固定偏好 query + 改寫後主題 query），去重後回傳
-        docs = retriever.invoke(PREFERENCE_QUERY)
-        if themed_query:
-            docs += retriever.invoke(themed_query)
-        return "\n\n".join(d.page_content for d in _dedup(docs))
+    def retrieve_preferences(query: str = "") -> str:
+        """檢索使用者過往旅遊紀錄中的偏好。一次查一個面向，可多次呼叫補齊。
+        - query 請用「偏好面向」關鍵詞，例如：住宿價位與風格、飲食在地小吃或餐廳、
+          行程步調、景點類型好惡、預算分配、踩雷與想避開的經驗。
+        - 不要帶目的地國名/城市名（如大阪、日本），那與過往國內紀錄語意不合會干擾檢索。
+        - 若規劃所需的某個偏好面向資訊還不足，請換關鍵詞「再呼叫一次」補齊。
+        - query 留空則回傳一份綜合的偏好概覽，適合第一次廣撈。"""
+        docs = retriever.invoke(query.strip() or PREFERENCE_QUERY)
+        return "\n\n".join(d.page_content for d in docs)
 
     return retrieve_preferences
 
@@ -96,10 +70,10 @@ def _tool_error_hint(e: Exception) -> str:
     )
 
 
-async def build_tools(retriever, llm):
+async def build_tools(retriever):
     client = MultiServerMCPClient(build_mcp_server_config())
     mcp_tools = await client.get_tools()
-    tools = [build_retrieve_tool(retriever, llm), *mcp_tools]
+    tools = [build_retrieve_tool(retriever), *mcp_tools]
     for t in tools:
         t.handle_tool_error = _tool_error_hint
     print(f"已組裝 {len(tools)} 個工具（1 個 RAG + {len(mcp_tools)} 個 MCP）")

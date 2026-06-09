@@ -43,7 +43,7 @@ async def main():
 
     # ── 3. 工具（RAG + MCP） ──
     print("正在組裝工具...")
-    tools = await build_tools(retriever, llm)
+    tools = await build_tools(retriever)
 
     # ── 4. 三個節點 ──
     print("正在建立節點...")
