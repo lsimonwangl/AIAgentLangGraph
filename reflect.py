@@ -1,24 +1,34 @@
-# ============================================================
-# reflect.py — reflect 節點（Reflection 核心）
-# ============================================================
-# 對 executor 產出的行程草案做多面向品質檢查，用 with_structured_output
-# 強制回傳 Critique（verdict + issues），讓條件邊能可靠判讀，
-# 不必去 parse 自由文字。回傳 critique 與 revisions+1。
-# ============================================================
+"""
+Travel Agent - Reflect 節點（Reflection）
+=======================================
+reflect.py 負責對 executor 產出的行程草案做多面向品質檢查，
+用 structured output 回傳 Critique（verdict + issues），讓條件邊能可靠判讀。
 
+執行流程：
+    0. 載入套件
+    1. 建立審核提示詞，定義檢查面向、來源權威性與收斂規則
+    2. 從對話歷史取出行程草案、使用者需求與本輪工具原始結果
+    3. 將草案與查核依據餵給 LLM，產出結構化的審核結果
+    4. 回傳 critique 與 revisions+1 寫入 state，交給條件邊路由
+
+此模組提供 create_reflect() 函式供 main.py 呼叫。
+"""
+
+# 載入套件
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
 from state import Critique, TravelState
 
 
-# 單則工具結果的截斷長度：Tavily 結果可達上萬字，全帶會撐爆 context。
-_TOOL_RESULT_CHARS = 1500
-
-
-# ===================== 多面向審核指引 =====================
-REFLECT_SYSTEM_PROMPT = """你是嚴謹的旅遊行程審核員。你自己沒有工具，但下方會附上 executor 本輪「實際用工具查回的原始資料」，
+def build_reflect_prompt() -> str:
+    """建立審核提示詞，定義 reflect 的檢查面向與判定規則。"""
+    return """\
+你是嚴謹的旅遊行程審核員。你自己沒有工具，但下方會附上 executor 本輪「實際用工具查回的原始資料」，
 這就是你查核事實的唯一依據。請對行程草案做多面向品質檢查，逐項判斷是否有問題：
 
-1. 偏好一致性：行程是否命中 RAG 推斷出的使用者偏好（住宿等級、預算分配、景點類型、交通習慣）。
+1. 偏好一致性：行程是否命中偏好檔案中的使用者偏好（住宿等級、預算分配、景點類型、交通習慣）。
+   偏好檔案明確顯示使用者不喜歡的類型（如過度觀光化商圈、踩雷經驗同類場所），
+   草案卻把它當主力景點或主要用餐地點 → 必須列為問題，不可因「那是當地經典」放行。
 2. 資訊時效/正確性（以下方工具結果為準，不要用你自己的記憶）：
    - 比對草案中的數字與事實（票價、開放時間、匯率、交通費、景點是否存在）是否與工具結果一致；
      不一致就標為問題，並指出「草案寫 X、工具結果是 Y」。
@@ -65,8 +75,8 @@ verdict 判定（務必與上面的 issues 一致）：
 - 不要因為「你檢查了很多項」就給 revise；revise 的唯一理由是「還有東西要改」。"""
 
 
-# ===================== 節點工廠 =====================
 def create_reflect(llm):
+    """建立 reflect 節點，回傳可註冊進 StateGraph 的 async 函式。"""
     # function_calling 模式相容於 NVIDIA OpenAI 相容端點（既有 bind_tools 已驗證可用）
     critic = llm.with_structured_output(Critique, method="function_calling")
 
@@ -78,36 +88,37 @@ def create_reflect(llm):
                 draft = msg.content
                 break
 
+        # 取最新一則使用者訊息，作為「需求與預算」的查核基準
         user_query = next(
-            (m.content for m in reversed(state["messages"])
-             if isinstance(m, HumanMessage)),
+            (msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)),
             "",
         )
 
-        # 收集 executor 本輪實際用工具查回的原始資料，作為 reflect 查核事實的依據，
-        # 讓它能比對「草案數字 vs 工具結果」而非憑記憶斷言。
+        # 收集 executor 本輪實際用工具查回的原始資料，作為 reflect 查核事實的依據。
+        # 遇到 HumanMessage 就重置：只留「最新需求之後」的工具結果，
+        # 不混入先前對話殘留的過期資料（既污染判斷又浪費 context）。
+        # 不截斷：截斷會剛好截掉關鍵上下文造成誤判（如把特急券加價當總票價）。
         tool_results = []
         for msg in state["messages"]:
-            if isinstance(msg, ToolMessage):
+            if isinstance(msg, HumanMessage):
+                tool_results = []
+            elif isinstance(msg, ToolMessage):
                 name = getattr(msg, "name", None) or "tool"
-                content = str(msg.content).strip()
-                if len(content) > _TOOL_RESULT_CHARS:
-                    content = f"{content[:_TOOL_RESULT_CHARS]}…（截斷）"
-                tool_results.append(f"【{name}】{content}")
+                tool_results.append(f"【{name}】{str(msg.content).strip()}")
         tool_block = "\n\n".join(tool_results) if tool_results else "（本輪無工具結果）"
 
         critique = await critic.ainvoke([
-            SystemMessage(content=REFLECT_SYSTEM_PROMPT),
+            SystemMessage(content=build_reflect_prompt()),
             HumanMessage(content=(
                 f"[使用者需求與預算]\n{user_query}\n\n"
+                f"[使用者偏好檔案]\n{state.get('preferences') or '無'}\n\n"
                 f"[executor 實際用工具查回的原始資料]\n{tool_block}\n\n"
                 f"[待審核的行程草案]\n{draft}"
             )),
         ])
 
-        # 存進 state 前轉成純 dict：Critique 是 Pydantic 自訂型別，
-        # 直接存進 checkpoint 會觸發 msgpack 未註冊型別警告（未來版本會被擋）。
-        # Pydantic 只留在 with_structured_output 的輸出邊界做驗證。
+        # 存進 state 前轉成純 dict：Pydantic 自訂型別直接存 checkpoint
+        # 會觸發 msgpack 未註冊型別警告，只在 structured output 邊界用 Pydantic 驗證。
         return {"critique": critique.model_dump(), "revisions": state.get("revisions", 0) + 1}
 
     return reflect

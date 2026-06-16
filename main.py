@@ -1,62 +1,69 @@
-# ============================================================
-# main.py — 主程式入口
-# ============================================================
-# 依序：建 RAG 檢索器 → 初始化 LLM → 組裝工具 → 建三個節點
-#       → 建 StateGraph → 啟動對話迴圈（含 interrupt 暫停/resume）。
-# ============================================================
+"""
+Travel Agent - 主程式入口
+=======================
+main.py 負責把偏好檢索、四個節點與 StateGraph 串成完整旅遊規劃流程。
 
-import os
-import sys
-import asyncio
+執行流程：
+    0. 載入套件與環境變數
+    1. 載入 executor 可以使用的 MCP 外部工具
+    2. 建立可以搜尋過往旅遊紀錄的 retriever
+    3. 初始化 LLM，建立 profile / planner / executor / reflect 四個節點
+    4. 組裝 StateGraph（profile → planner → executor → reflect 審核迴圈）
+    5. 啟動終端機互動介面，接收使用者多輪問題
+
+執行方式：
+    python main.py
+"""
+
+# 載入套件與環境變數工具
 from dotenv import load_dotenv
+
+# 載入環境變數
+load_dotenv()
+
+# 載入套件
+import asyncio
+import os
+
 from langchain_openai import ChatOpenAI
 
-# 強制終端輸出走 UTF-8：行程內容含「・」「円」等字元，
-# Windows 預設 cp950 console 會在 print 時拋 UnicodeEncodeError。
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-
-from rag import build_retriever
-from tools import build_tools
-from planner import create_planner
+from chat import run_chat
 from executor import create_executor
-from reflect import create_reflect
 from graph import build_graph
-from chat import chat_loop
-
-load_dotenv()
+from planner import create_planner
+from preferences import create_profile
+from rag import build_retriever
+from reflect import create_reflect
+from tools import load_mcp_tools
 
 
 async def main():
-    # ── 1. RAG 檢索器 ──
-    print("正在建立 RAG 檢索器...")
+    # 載入外部工具：Tavily 搜尋景點、open-meteo 查天氣、frankfurter 換匯率
+    # mcp_client 保留在區域變數，讓終端機對話期間工具連線持續有效
+    mcp_client, tools = await load_mcp_tools()
+
+    # 建立 RAG 檢索器，用來從過往旅遊紀錄找出相關偏好
     retriever = build_retriever()
 
-    # ── 2. LLM（NVIDIA 端點） ──
-    print("正在初始化 LLM...")
+    # 初始化 LLM，透過 NVIDIA API 相容端點呼叫
     llm = ChatOpenAI(
-        model=os.getenv("CHAT_MODEL"),
-        api_key=os.getenv("NVIDIA_API_KEY"),
         base_url="https://integrate.api.nvidia.com/v1",
-        temperature=0.7,
+        api_key=os.getenv("NVIDIA_API_KEY"),
+        model=os.getenv("CHAT_MODEL"),
         stream_chunk_timeout=300,  # NVIDIA 共享 API 偶爾排隊較久，放寬至 5 分鐘
     )
 
-    # ── 3. 工具（RAG + MCP） ──
-    print("正在組裝工具...")
-    tools = await build_tools(retriever)
-
-    # ── 4. 三個節點 ──
-    print("正在建立節點...")
+    # 建立四個節點：偏好前置檢索、規劃、執行、審核
+    profile = create_profile(retriever)
     planner = create_planner(llm)
     executor = create_executor(llm, tools)
     reflect = create_reflect(llm)
 
-    # ── 5. StateGraph ──
-    print("正在建構 StateGraph...")
-    app = build_graph(planner, executor, reflect)
+    # 組裝 StateGraph，把節點串成「規劃 → 執行 → 審核」的迴圈
+    graph = build_graph(profile, planner, executor, reflect)
 
-    # ── 6. 對話迴圈 ──
-    await chat_loop(app)
+    # 啟動終端機介面，讓使用者可以一輪一輪輸入需求
+    await run_chat(graph)
 
 
 if __name__ == "__main__":
