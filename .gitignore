@@ -24,6 +24,7 @@ dist/
 .claude/
 .vscode/
 .idea/
+.understand-anything/
 
 # Logs and runtime output
 *.log
