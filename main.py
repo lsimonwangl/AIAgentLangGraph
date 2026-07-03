@@ -7,8 +7,8 @@ main.py 負責把偏好檢索、四個節點與 StateGraph 串成完整旅遊規
     0. 載入套件與環境變數
     1. 載入 executor 可以使用的 MCP 外部工具
     2. 建立可以搜尋過往旅遊紀錄的 retriever
-    3. 初始化 LLM，建立 profile / planner / executor / reflect 四個節點
-    4. 組裝 StateGraph（profile → planner → executor → reflect 審核迴圈）
+    3. 初始化 LLM，建立 retrieve_preferences / planner / executor / reflect 四個節點
+    4. 組裝 StateGraph（retrieve_preferences → planner → executor → reflect 審核迴圈）
     5. 啟動終端機互動介面，接收使用者多輪問題
 
 執行方式：
@@ -25,15 +25,16 @@ load_dotenv()
 import asyncio
 import os
 
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_openai import ChatOpenAI
 
 from chat import run_chat
 from executor import create_executor
 from graph import build_graph
 from planner import create_planner
-from preferences import create_profile
 from rag import build_retriever
 from reflect import create_reflect
+from retrieve_preferences import create_retrieve_preferences
 from tools import load_mcp_tools
 
 
@@ -45,22 +46,24 @@ async def main():
     # 建立 RAG 檢索器，用來從過往旅遊紀錄找出相關偏好
     retriever = build_retriever()
 
-    # 初始化 LLM，透過 NVIDIA API 相容端點呼叫
+    # 初始化 LLM，使用 NVIDIA API（OpenAI 相容）
     llm = ChatOpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
         api_key=os.getenv("NVIDIA_API_KEY"),
-        model=os.getenv("CHAT_MODEL"),
-        stream_chunk_timeout=300,  # NVIDIA 共享 API 偶爾排隊較久，放寬至 5 分鐘
+        model=os.getenv("CHAT_MODEL"),  # .env 需設成 NVIDIA 模型
+        stream_chunk_timeout=300,  # 放寬回應等待至 5 分鐘，容忍共享 API 排隊
+        max_retries=2,  # 限制 retry 次數，避免 429 時連發請求形成 retry storm
+        rate_limiter=InMemoryRateLimiter(requests_per_second=0.15, max_bucket_size=1),  # 主動降速約 9 RPM 並關閉爆發，留 RPM 上限安全邊際
     )
 
     # 建立四個節點：偏好前置檢索、規劃、執行、審核
-    profile = create_profile(retriever)
+    retrieve_preferences = create_retrieve_preferences(retriever)
     planner = create_planner(llm)
     executor = create_executor(llm, tools)
     reflect = create_reflect(llm)
 
     # 組裝 StateGraph，把節點串成「規劃 → 執行 → 審核」的迴圈
-    graph = build_graph(profile, planner, executor, reflect)
+    graph = build_graph(retrieve_preferences, planner, executor, reflect)
 
     # 啟動終端機介面，讓使用者可以一輪一輪輸入需求
     await run_chat(graph)

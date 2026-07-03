@@ -22,12 +22,6 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from prompt import read_query
 
-# 各節點的區段標題，串流時依目前節點切換顯示
-_HEADERS = {
-    "planner": "Planner — 規劃 / 修訂計畫",
-    "executor": "Executor — 執行與生成（ReAct）",
-}
-
 
 def preview_text(text: str, max_chars: int = 400) -> str:
     """截斷過長文字，避免工具回傳洗版終端機。"""
@@ -50,7 +44,9 @@ def _print_tool_activity(node_output: dict):
     executor 是 create_agent 子圖，其工具呼叫/結果走 subgraph 的 updates 事件。
     """
     for value in node_output.values():
-        for msg in value.get("messages", []) if isinstance(value, dict) else []:
+        if not isinstance(value, dict):
+            continue
+        for msg in value.get("messages", []):
             if isinstance(msg, AIMessage) and msg.tool_calls:
                 # Agent 決定呼叫工具：印出工具名稱與參數，讓使用者知道它正在查什麼
                 for tool_call in msg.tool_calls:
@@ -61,20 +57,61 @@ def _print_tool_activity(node_output: dict):
                 print(f"✅ 工具回傳: {preview_text(msg.content, 150)}", flush=True)
 
 
+def _print_preferences(output):
+    """偏好前置檢索完成：印出檢索到的偏好片段摘要。"""
+    preferences = output.get("preferences")
+    if not preferences:
+        return
+    print_header("Retrieve Preferences — 偏好前置檢索")
+    print('📚 輸出欄位：state["preferences"]（偏好原文片段）')
+    print(preview_text(preferences, 600))
+
+
+def _print_plan(output):
+    """計畫產出完成：逐條列出步驟。"""
+    print_header("Planner — 規劃 / 修訂計畫")
+    print('輸出欄位：state["plan"]（可修改的計畫物件）')
+    for i, step in enumerate(output.get("plan", []), 1):
+        print(f"  {i}. {step}")
+
+
+def _print_critique(output):
+    """審核完成：印出 verdict、修正次數與發現的問題。"""
+    critique = output.get("critique")
+    print_header("Reflect — 多面向品質檢查")
+    print('輸出欄位：state["critique"]（structured output）')
+    print(f"  verdict：{critique['verdict'] if critique else '?'}")
+    print(f"  revisions：{output.get('revisions', 0)}")
+    issues = critique["issues"] if critique else []
+    if issues:
+        print("  issues：")
+        for issue in issues:
+            print(f"    ・{issue}")
+
+
+# 頂層節點名稱 → 對應的顯示函式
+NODE_PRINTERS = {
+    "retrieve_preferences": _print_preferences,
+    "planner": _print_plan,
+    "reflect": _print_critique,
+}
+
+
 def _handle_event(ns, mode, data, st: dict):
     """依事件來源（頂層/子圖）與類型（messages/updates）分流顯示。"""
     # ── 子圖（executor 內部）事件 ──
     if ns:
-        if mode == "messages":
-            chunk, _meta = data
-            # 只串流 LLM 的推理/行程文字；工具回傳內容交給 _print_tool_activity 截斷顯示
-            if chunk.content and not isinstance(chunk, ToolMessage):
-                if st["header"] != "executor":
-                    print_header(_HEADERS["executor"])
-                    st["header"] = "executor"
-                print(chunk.content, end="", flush=True)
-        elif mode == "updates":
+        if mode == "updates":
             _print_tool_activity(data)
+            return
+        chunk, _meta = data
+        # 只串流 LLM 的推理/行程文字；工具回傳內容交給 _print_tool_activity 截斷顯示
+        if not chunk.content or isinstance(chunk, ToolMessage):
+            return
+        if st["header"] != "executor":
+            print_header("Executor — 執行與生成")
+            st["header"] = "executor"
+        print(chunk.content, end="", flush=True)
         return
 
     # ── 頂層事件 ──
@@ -84,46 +121,19 @@ def _handle_event(ns, mode, data, st: dict):
 
     # mode == "updates"：節點跑完時印出寫入 state 的欄位
     for node_name, output in data.items():
-        if node_name == "profile":
-            # 偏好前置檢索完成：印出檢索到的偏好片段摘要
-            preferences = (output or {}).get("preferences")
-            if preferences:
-                print_header("Profile — 偏好前置檢索")
-                print('📚 輸出欄位：state["preferences"]（偏好原文片段）')
-                print(preview_text(preferences, 600))
-            st["header"] = None
-        elif node_name == "planner":
-            # 計畫產出完成：逐條列出步驟
-            print_header(_HEADERS["planner"])
-            print('輸出欄位：state["plan"]（可修改的計畫物件）')
-            for i, step in enumerate(output.get("plan", []), 1):
-                print(f"  {i}. {step}")
-            st["header"] = None
-        elif node_name == "executor":
-            st["header"] = None  # 行程草案已串流完
-        elif node_name == "reflect":
-            # 審核完成：印出 verdict、修正次數與發現的問題
-            critique = output.get("critique")
-            print_header("Reflect — 多面向品質檢查")
-            print('輸出欄位：state["critique"]（structured output）')
-            print(f"  verdict：{critique['verdict'] if critique else '?'}")
-            print(f"  revisions：{output.get('revisions', 0)}")
-            issues = critique["issues"] if critique else []
-            if issues:
-                print("  issues：")
-                for issue in issues:
-                    print(f"    ・{issue}")
-            st["header"] = None
-
-
-# 串流狀態：跨事件記住目前 header，避免同一節點重複印標題
-_STREAM_STATE = {"header": None}
+        printer = NODE_PRINTERS.get(node_name)
+        if printer:
+            printer(output)
+    # 任何頂層節點跑完都重置 header；executor 串流時才會重新印標題
+    st["header"] = None
 
 
 async def run_chat(graph):
     """啟動多輪對話介面，直到使用者主動結束。"""
     # 設定固定 thread_id，讓 graph 可以保留多輪對話記憶
     config = {"configurable": {"thread_id": "travel-session-1"}}
+    # 串流狀態：跨事件記住目前 header，避免同一節點重複印標題
+    stream_state = {"header": None}
 
     print(
         """
@@ -131,7 +141,7 @@ async def run_chat(graph):
 🧳 個人化旅遊規劃 Agentic AI（LangGraph）已就緒
 💡 輸入旅遊需求開始規劃，輸入 'exit' 或 'quit' 結束
 💡 範例：
-   1. 根據我的旅遊習慣幫我安排下週二三天兩夜的大阪觀光行程
+   1. 幫我安排下周二三天兩夜的大阪的古蹟參訪行程
    2. 幫我把 Day 2 改成以室內景點為主
 ==================================================
 """
@@ -157,11 +167,11 @@ async def run_chat(graph):
         }
 
         # 串流執行本輪 graph，依事件即時顯示各節點進度
-        _STREAM_STATE["header"] = None
+        stream_state["header"] = None
         async for ns, mode, data in graph.astream(
             payload, config, stream_mode=["updates", "messages"], subgraphs=True
         ):
-            _handle_event(ns, mode, data, _STREAM_STATE)
+            _handle_event(ns, mode, data, stream_state)
 
         print("\n\n✅ 本輪規劃完成\n")
         turn += 1

@@ -36,7 +36,7 @@ class TravelState(MessagesState):
     配合 checkpointer + thread_id 天然支援多 session 隔離。
     """
 
-    preferences: str       # profile 節點檢索的偏好原文片段，planner/executor/reflect 共用同一份
+    preferences: str       # retrieve_preferences 節點檢索的偏好原文片段，planner/executor/reflect 共用同一份
     plan: list[str]        # planner 產出的可修改計畫（Planning 核心）
     critique: dict | None  # reflect 的審核結果（Critique.model_dump()，存 dict 以利 checkpoint 序列化）
     revisions: int         # 修正次數，達上限就結束迴圈避免無窮修訂

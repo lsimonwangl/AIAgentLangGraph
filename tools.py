@@ -1,7 +1,7 @@
 """
 Travel Agent - Tool 載入
 =======================
-tools.py 負責設定 executor 可使用的 MCP tools，包含網路搜尋、天氣查詢與匯率換算。
+tools.py 負責設定 Agent 可使用的 MCP tools，包含網路搜尋、天氣查詢與匯率換算。
 
 執行流程：
     0. 載入套件
@@ -11,7 +11,7 @@ tools.py 負責設定 executor 可使用的 MCP tools，包含網路搜尋、天
     4. 使用 MultiServerMCPClient 啟動 MCP tool servers
     5. 回傳 MCP client 與 tools 給 main.py 使用
 
-偏好檢索不做成工具：那是每次規劃的必要輸入，由 profile 節點前置取得。
+偏好檢索不做成工具：那是每次規劃的必要輸入，由 retrieve_preferences 節點前置取得。
 
 此模組提供 build_mcp_server_config() 與 load_mcp_tools() 函式供 main.py 呼叫。
 """
@@ -69,7 +69,7 @@ async def load_mcp_tools():
     # 建立 MCP client，依照 server config 啟動外部工具服務
     client = MultiServerMCPClient(build_mcp_server_config())
 
-    # 取得 LangChain Agent 可以直接使用的 tools 清單
+    # 取得 Agent 可以直接使用的 tools 清單
     tools = await client.get_tools()
 
     # 工具錯誤容錯：handle_tool_error 預設 False，工具失敗會拋例外導致整個程式崩潰；

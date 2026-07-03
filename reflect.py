@@ -39,7 +39,13 @@ def build_reflect_prompt() -> str:
    - 票券效期務必查核：若行程用到多日票券（如周遊卡 1日券/2日券、地鐵N日券），確認它涵蓋的天數是否覆蓋實際使用日。
      例如 2日券只在 Day1+Day2 有效，Day3 仍標「持券免費」就是效期矛盾，必須標為問題；反之單買/自費才正確。
 4. 完整性：plan 各步驟是否執行完；住宿、交通、注意事項、預算明細是否齊全；跨國行程是否漏算機票等大項。
-5. 預算可行性：以工具回的匯率換算後的總成本是否在使用者預算內、是否有漏項導致低估。
+5. 預算可行性與算術一致性（這幾項用工具就能核，務必逐筆驗算，錯了一律判 revise）：
+   - 重算總和：把草案列出的各項（門票、交通、餐飲、住宿…）自己加一遍，與草案寫的「合計」對不上就標問題，指出「草案合計寫 X、各項相加應為 Y」。
+   - 單位一致：草案標「每人」就全部用每人計；雙人房/雙人分攤的住宿是「整間房總價」，放進每人總計前必須先除以人數。
+     若草案把整間房價直接塞進「每人」總計（或反過來），就是分攤錯誤，必須標為問題。
+   - 套票不得高於任一單買元件：套票價若低於它所含的某一張單買票（如套票 1,000 < 天守閣單買 1,200），邏輯不可能，標為問題（多半是抓錯或幻覺）。
+   - 與偏好檔的消費水準對照：換算後每人總成本若明顯超出偏好檔顯示的過往習慣（且 plan 有要求超支就調整），標為問題要求改平價方案。
+   - 是否有漏項導致低估（跨國漏機票等）。
 
 重要邊界——工具拿不到的東西不要當成 revise 理由：
 機票票價、飯店房價、即時座位/空房這類「特定日期的即時報價與庫存」，現有工具（搜尋引擎）本來就查不到精確值，
@@ -97,7 +103,6 @@ def create_reflect(llm):
         # 收集 executor 本輪實際用工具查回的原始資料，作為 reflect 查核事實的依據。
         # 遇到 HumanMessage 就重置：只留「最新需求之後」的工具結果，
         # 不混入先前對話殘留的過期資料（既污染判斷又浪費 context）。
-        # 不截斷：截斷會剛好截掉關鍵上下文造成誤判（如把特急券加價當總票價）。
         tool_results = []
         for msg in state["messages"]:
             if isinstance(msg, HumanMessage):
@@ -107,9 +112,24 @@ def create_reflect(llm):
                 tool_results.append(f"【{name}】{str(msg.content).strip()}")
         tool_block = "\n\n".join(tool_results) if tool_results else "（本輪無工具結果）"
 
+        # 第一次審核強制至少修一輪：草案再好也挑出單一個最有價值的改進點判 revise，
+        # 讓 reflect 迴圈確實跑過一次；複審才套用嚴格收斂規則。revisions 在 reflect 結尾才+1，
+        # 所以第一次進來時為 0。
+        if state.get("revisions", 0) == 0:
+            review_rule = (
+                "[本次為第一次審核] 即使草案大致良好，也必須挑出『單一個』最有價值的具體改進點"
+                "（資訊更精確、動線更順、預算更貼合偏好等），給 verdict=revise 並寫成一條 issue；"
+                "唯有草案完全無可挑剔時才 pass。"
+            )
+        else:
+            review_rule = (
+                "[本次為複審] 套用嚴格收斂規則：沒有真正需要改動的就 pass，不要為挑而挑、不要重翻舊帳。"
+            )
+
         critique = await critic.ainvoke([
             SystemMessage(content=build_reflect_prompt()),
             HumanMessage(content=(
+                f"{review_rule}\n\n"
                 f"[使用者需求與預算]\n{user_query}\n\n"
                 f"[使用者偏好檔案]\n{state.get('preferences') or '無'}\n\n"
                 f"[executor 實際用工具查回的原始資料]\n{tool_block}\n\n"
