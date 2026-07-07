@@ -15,9 +15,23 @@ reflect.py 負責對 executor 產出的行程草案做多面向品質檢查，
 """
 
 # 載入套件
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from typing import Literal
 
-from state import Critique, TravelState
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import BaseModel, Field
+
+from state import TravelState
+
+
+class Critique(BaseModel):
+    """reflect 節點的審核結果。
+
+    用 llm.with_structured_output(Critique) 強制模型回傳固定結構，
+    讓 graph 的條件邊能可靠判讀，不必解析自由文字。
+    """
+
+    verdict: Literal["pass", "revise"] = Field(description="通過或需修正")
+    issues: list[str] = Field(default_factory=list, description="各面向發現的問題")
 
 
 def build_reflect_prompt() -> str:
