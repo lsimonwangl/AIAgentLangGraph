@@ -6,7 +6,7 @@ executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產�
 執行流程：
     0. 載入套件
     1. 建立系統提示詞，定義工具使用規則、查證原則與輸出格式
-    2. 用 create_agent 建立 ReAct agent（工具迴圈由 prebuilt agent 自己管理）
+    2. 用 create_agent 建立 agent
     3. 將對話歷史、偏好檔案與執行計畫組成一次性指令餵給 agent
     4. 只把 agent 新產生的訊息併回 state：指令不能寫進對話歷史，
        否則會被 planner/reflect 誤認成「最後一則使用者需求」，
