@@ -20,7 +20,7 @@ from typing import Literal
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
 
-from state import TravelState
+from ..state import TravelState
 
 
 class Critique(BaseModel):
@@ -34,9 +34,7 @@ class Critique(BaseModel):
     issues: list[str] = Field(default_factory=list, description="各面向發現的問題")
 
 
-def build_reflect_prompt() -> str:
-    """建立審核提示詞，定義 reflect 的檢查面向與判定規則。"""
-    return """\
+REFLECT_SYSTEM_PROMPT = """\
 你是嚴謹的旅遊行程審核員。你自己沒有工具，但下方會附上 executor 本輪「實際用工具查回的原始資料」，
 這就是你查核事實的唯一依據。請對行程草案做多面向品質檢查，逐項判斷是否有問題：
 
@@ -141,7 +139,7 @@ def create_reflect(llm):
             )
 
         critique = await critic.ainvoke([
-            SystemMessage(content=build_reflect_prompt()),
+            SystemMessage(content=REFLECT_SYSTEM_PROMPT),
             HumanMessage(content=(
                 f"{review_rule}\n\n"
                 f"[使用者需求與預算]\n{user_query}\n\n"

@@ -9,7 +9,7 @@ tools.py 負責設定 Agent 可使用的 MCP tools，包含網路搜尋、天氣
     2. 建立 open-meteo MCP server 設定，供 Agent 查詢天氣資訊
     3. 建立 frankfurter MCP server 設定，供 Agent 換算匯率
     4. 使用 MultiServerMCPClient 啟動 MCP tool servers
-    5. 回傳 MCP client 與 tools 給 main.py 使用
+    5. 回傳 tools 給 main.py 使用
 
 偏好檢索不做成工具：那是每次規劃的必要輸入，由 retrieve_preferences 節點前置取得。
 
@@ -78,4 +78,4 @@ async def load_mcp_tools():
         tool.handle_tool_error = _tool_error_hint
 
     print(f"✅ 已組裝 {len(tools)} 個 MCP 工具")
-    return client, tools
+    return tools

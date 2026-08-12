@@ -5,7 +5,7 @@ chat.py 負責顯示啟動畫面、串流各節點執行進度，並驅動多輪
 
 執行流程：
     0. 顯示啟動 banner 與範例問題
-    1. 透過 prompt.read_query 接收使用者輸入
+    1. 透過 read_query 接收使用者輸入
     2. 呼叫 graph.astream 串流接收節點事件（updates + messages，含子圖）
     3. 依節點類型分別顯示偏好檢索、計畫、工具呼叫、行程草案與審核結果
     4. 使用者結束輸入時印出告別訊息
@@ -14,13 +14,32 @@ chat.py 負責顯示啟動畫面、串流各節點執行進度，並驅動多輪
     - messages：即時 token（executor 行程草案；planner/reflect 是 structured output，無文字可串）
     - updates ：節點產出的 state 欄位（preferences / plan / critique），與子圖工具呼叫
 
-此模組提供 run_chat() 函式供 main.py 呼叫。
+此模組提供 run_terminal_chat() 函式供 main.py 呼叫。
 """
 
 # 載入套件
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from prompt import read_query
+
+BANNER = """
+==================================================
+🧳 個人化旅遊規劃 Agentic AI（LangGraph）已就緒
+💡 輸入旅遊需求開始規劃，輸入 'exit' 或 'quit' 結束
+💡 範例：
+   1. 幫我安排下周二三天兩夜的大阪的古蹟參訪行程
+   2. 幫我把 Day 2 改成以室內景點為主
+==================================================
+"""
+
+
+def read_query(turn: int) -> str | None:
+    """讀取一輪終端機輸入；結束關鍵字或中斷訊號回傳 None。"""
+    try:
+        query = input(f"[第 {turn} 輪] 你：").strip()
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    return None if query.lower() in {"exit", "quit"} else query
 
 
 def preview_text(text: str, max_chars: int = 400) -> str:
@@ -128,24 +147,32 @@ def _handle_event(ns, mode, data, st: dict):
     st["header"] = None
 
 
-async def run_chat(graph):
-    """啟動多輪對話介面，直到使用者主動結束。"""
-    # 設定固定 thread_id，讓 graph 可以保留多輪對話記憶
-    config = {"configurable": {"thread_id": "travel-session-1"}}
-    # 串流狀態：跨事件記住目前 header，避免同一節點重複印標題
-    stream_state = {"header": None}
+def _build_turn_payload(user_input: str) -> dict:
+    """建立單輪 graph 輸入，並重置不應跨輪殘留的欄位。"""
+    return {
+        "messages": [HumanMessage(content=user_input)],
+        "plan": [],
+        "critique": None,
+        "revisions": 0,
+    }
 
-    print(
-        """
-==================================================
-🧳 個人化旅遊規劃 Agentic AI（LangGraph）已就緒
-💡 輸入旅遊需求開始規劃，輸入 'exit' 或 'quit' 結束
-💡 範例：
-   1. 幫我安排下周二三天兩夜的大阪的古蹟參訪行程
-   2. 幫我把 Day 2 改成以室內景點為主
-==================================================
-"""
-    )
+
+async def _stream_turn(graph, payload: dict, config: dict):
+    """執行並顯示一輪 graph 事件。"""
+    stream_state = {"header": None}
+    async for ns, mode, data in graph.astream(
+        payload,
+        config,
+        stream_mode=["updates", "messages"],
+        subgraphs=True,
+    ):
+        _handle_event(ns, mode, data, stream_state)
+
+
+async def run_terminal_chat(graph, thread_id: str = "travel-session-1"):
+    """啟動終端機多輪對話，直到使用者主動結束。"""
+    config = {"configurable": {"thread_id": thread_id}}
+    print(BANNER)
 
     # 持續接收使用者輸入，直到 read_query 回傳 None
     turn = 1
@@ -157,21 +184,7 @@ async def run_chat(graph):
         if not user_input:
             continue
 
-        # 本輪輸入：丟新的 HumanMessage（add_messages 自動 append），
-        # 並重置 transient 欄位，避免上一輪殘留干擾
-        payload = {
-            "messages": [HumanMessage(content=user_input)],
-            "plan": [],
-            "critique": None,
-            "revisions": 0,
-        }
-
-        # 串流執行本輪 graph，依事件即時顯示各節點進度
-        stream_state["header"] = None
-        async for ns, mode, data in graph.astream(
-            payload, config, stream_mode=["updates", "messages"], subgraphs=True
-        ):
-            _handle_event(ns, mode, data, stream_state)
+        await _stream_turn(graph, _build_turn_payload(user_input), config)
 
         print("\n\n✅ 本輪規劃完成\n")
         turn += 1

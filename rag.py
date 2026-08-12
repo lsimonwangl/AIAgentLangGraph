@@ -12,19 +12,15 @@ rag.py 負責將 ./data 中的旅遊紀錄轉成向量資料，並建立可供 m
     5. 透過 Milvus.from_documents 建立 travel_preferences collection
     6. 將向量資料庫轉成 retriever，供 retrieve_preferences 節點查詢相關旅遊偏好
 
-此模組提供 build_retriever() 函式供 main.py 呼叫。
+此模組提供 build_retriever() 函式供 main.py 呼叫；Embedding client 由外部注入。
 """
-
-# 載入套件
-import os
 
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_milvus import Milvus
-from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
-def build_retriever():
+def build_retriever(embeddings):
     """讀取 ./data 旅遊紀錄、切片向量化存入 Milvus，回傳供節點查詢偏好的 retriever。"""
     print("🔨 建立 Milvus collection，讀取 ./data")
 
@@ -46,7 +42,7 @@ def build_retriever():
     # 用 NVIDIA NIM Embedding 向量化後建立 collection（drop_old：每次啟動重建）
     vector_store = Milvus.from_documents(
         documents=chunks,
-        embedding=NVIDIAEmbeddings(model=os.getenv("EMBEDDING_MODEL")),
+        embedding=embeddings,
         collection_name="travel_preferences",
         connection_args={"uri": "http://localhost:19530"},
         drop_old=True,

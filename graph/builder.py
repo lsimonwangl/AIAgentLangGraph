@@ -1,7 +1,7 @@
 """
 Travel Agent - StateGraph 組裝
 =============================
-graph.py 負責把四個節點組成 LangGraph 主流程，並設定審核迴圈的條件邊。
+graph/builder.py 負責把四個節點組成 LangGraph 主流程，並設定審核迴圈的條件邊。
 
 執行流程：
     0. 載入套件
@@ -16,7 +16,7 @@ graph.py 負責把四個節點組成 LangGraph 主流程，並設定審核迴圈
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 
-from state import TravelState
+from .state import TravelState
 
 
 def route(state: TravelState):

@@ -1,7 +1,7 @@
 """
-Travel Agent - State 定義
-========================
-state.py 負責定義整張 StateGraph 共享的 TravelState。
+Travel Agent - Graph State 定義
+==============================
+graph/state.py 負責定義整張 StateGraph 共享的 TravelState。
 
 執行流程：
     0. 載入套件

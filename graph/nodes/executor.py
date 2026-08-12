@@ -21,12 +21,10 @@ from datetime import date
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 
-from state import TravelState
+from ..state import TravelState
 
 
-def build_system_prompt() -> str:
-    """建立系統提示詞，定義 executor 的工具規則、查證原則與輸出格式。"""
-    return """\
+EXECUTOR_SYSTEM_PROMPT = """\
 你是個人化旅遊規劃的執行助理，手上有三類工具：
 Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open-Meteo）、匯率換算（Frankfurter）。
 
@@ -81,7 +79,7 @@ Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open
 def create_executor(llm, tools):
     """建立 executor 節點，回傳可註冊進 StateGraph 的 async 函式。"""
     # 組合模型、工具與系統提示詞，建立可執行的 ReAct agent
-    agent = create_agent(llm, tools, system_prompt=build_system_prompt())
+    agent = create_agent(llm, tools, system_prompt=EXECUTOR_SYSTEM_PROMPT)
 
     async def executor(state: TravelState) -> dict:
         # 把 planner 產出的 plan 與偏好檔案組成本輪指令，連同對話歷史一起餵給 agent

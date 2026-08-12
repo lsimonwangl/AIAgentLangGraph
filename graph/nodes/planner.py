@@ -19,7 +19,7 @@ from datetime import date
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
-from state import TravelState
+from ..state import TravelState
 
 
 class Plan(BaseModel):
@@ -28,9 +28,7 @@ class Plan(BaseModel):
     steps: list[str] = Field(description="有序的執行計畫，每個元素是一個可執行步驟")
 
 
-def build_plan_prompt() -> str:
-    """建立規劃提示詞，告訴 planner 怎麼拆解需求、反映偏好與處理 critique。"""
-    return """\
+PLAN_SYSTEM_PROMPT = """\
 你是旅遊規劃的任務分析師，負責把使用者的旅遊需求拆解成一份有序的執行計畫。
 計畫每一步是一個可執行動作，後續會交給具備工具（搜尋/天氣/匯率）的 executor 依序執行。
 標準步驟骨架（可依需求增減、調整順序）：
@@ -81,7 +79,7 @@ def create_planner(llm):
         ))
         # 依序餵入系統規則、對話歷史與本輪指令，產出結構化計畫
         plan = await plan_llm.ainvoke([
-            SystemMessage(content=build_plan_prompt()),  # 系統提示詞，定義規劃規則與步驟骨架
+            SystemMessage(content=PLAN_SYSTEM_PROMPT),  # 系統提示詞，定義規劃規則與步驟骨架
             *state["messages"],                          # 對話歷史，含使用者最新旅遊需求
             directive,                                   # 本輪規劃指令：日期、偏好檔案與審核問題
         ])
