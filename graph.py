@@ -26,8 +26,8 @@ def route(state: TravelState):
     「該補資料還是該重規劃」的診斷交給 planner 讀 critique 後自行決定。
     """
     critique = state.get("critique")
-    # 修正次數上限設 4：實測修正過程會收斂（issues 逐輪減少），避免極端情況無窮迴圈
-    if (critique is not None and critique["verdict"] == "pass") or state.get("revisions", 0) >= 4:
+    # 教學範例最多審核三次，也就是最多自動修訂兩次，避免流程過長
+    if (critique is not None and critique["verdict"] == "pass") or state.get("revisions", 0) >= 3:
         return END
     return "planner"
 
