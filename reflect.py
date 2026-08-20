@@ -4,17 +4,15 @@ Travel Agent - Reflect 節點（Reflection）
 reflect.py 負責對 executor 產出的行程草案做多面向品質檢查，
 用 structured output 回傳 Critique（verdict + issues），讓條件邊能可靠判讀。
 
-執行流程：
-    0. 載入套件
-    1. 建立審核提示詞，定義需求、偏好、完整性與合理性等檢查面向
-    2. 從對話歷史取出行程草案與使用者需求
-    3. 將需求、偏好與草案餵給 LLM，產出結構化的審核結果
-    4. 回傳 critique 與 revisions+1 寫入 state，交給條件邊路由
-
-此模組提供 create_reflect() 函式供 main.py 呼叫。
+程式流程：
+  1. 定義 Critique 結構，限制審核結果只能是 pass 或 revise。
+  2. 建立結果審核提示詞，定義需求、偏好、完整性與合理性等檢查面向。
+  3. 從 State 取出使用者需求、偏好資料與最新行程草案。
+  4. 使用 LLM 產生結構化審核結果。
+  5. 將 critique 與審核輪次寫回 State，交給條件邊判斷流程走向。
 """
 
-# 載入套件
+# ── 載入套件 ──────────────────────────────────────────────
 from typing import Literal
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -23,6 +21,7 @@ from pydantic import BaseModel, Field
 from state import TravelState
 
 
+# ── 定義 Reflect 的結構化輸出 ─────────────────────────────
 class Critique(BaseModel):
     """reflect 節點的審核結果。
 
@@ -30,10 +29,13 @@ class Critique(BaseModel):
     讓 graph 的條件邊能可靠判讀，不必解析自由文字。
     """
 
+    # verdict 限制為兩種字串，讓條件邊可以直接判斷下一步。
     verdict: Literal["pass", "revise"] = Field(description="通過或需修正")
+    # issues 保存需要修改的具體問題；通過時使用空 list。
     issues: list[str] = Field(default_factory=list, description="各面向發現的問題")
 
 
+# ── Reflect Prompt：結果審核面向與判定規則 ───────────────
 def build_reflect_prompt() -> str:
     """建立審核提示詞，定義 reflect 的檢查面向與判定規則。"""
     return """\
@@ -56,36 +58,45 @@ issues 最多列 2 項，每項用一句話清楚指出要修改的內容。
 若只有提醒事項而沒有必要修改，必須判 pass。"""
 
 
+# ── 建立 Reflect 節點 ─────────────────────────────────────
 def create_reflect(llm):
     """建立 reflect 節點，回傳可註冊進 StateGraph 的 async 函式。"""
-    # function_calling 模式相容於 NVIDIA OpenAI 相容端點（既有 bind_tools 已驗證可用）
+    # 套用 Critique 結構後，LLM 必須回傳 verdict 與 issues，不需再解析自由文字。
+    # function_calling 模式相容於目前使用的 NVIDIA OpenAI 相容端點。
     critic = llm.with_structured_output(Critique, method="function_calling")
 
+    # 內部 async 函式就是實際註冊到 StateGraph 的 Reflect 節點。
     async def reflect(state: TravelState) -> dict:
-        # 取最後一則有內容的 AI 訊息，即 executor 產出的行程草案
+        # 先使用空字串初始化，避免找不到 AIMessage 時變數尚未定義。
         draft = ""
+        # 對話歷史由新到舊搜尋，第一則有內容的 AIMessage 就是 Executor 最新草案。
         for msg in reversed(state["messages"]):
+            # 略過 HumanMessage、ToolMessage 與沒有文字內容的 AIMessage。
             if isinstance(msg, AIMessage) and msg.content:
                 draft = msg.content
+                # 已取得最新草案，不需要繼續掃描更早的訊息。
                 break
 
-        # 取最新一則使用者訊息，作為需求符合度的審核基準
+        # 同樣由新到舊取出最新 HumanMessage，作為需求符合度的審核基準。
+        # 若歷史中沒有使用者訊息，next() 會回傳空字串。
         user_query = next(
             (msg.content for msg in reversed(state["messages"]) if isinstance(msg, HumanMessage)),
             "",
         )
 
+        # 將審核規則放在 SystemMessage，再用 HumanMessage 提供本輪實際審核資料。
         critique = await critic.ainvoke([
-            SystemMessage(content=build_reflect_prompt()),
+            SystemMessage(content=build_reflect_prompt()),  # 定義審核面向與 pass/revise 規則
             HumanMessage(content=(
-                f"[使用者需求]\n{user_query}\n\n"
-                f"[使用者偏好檔案]\n{state.get('preferences') or '無'}\n\n"
-                f"[待審核的行程草案]\n{draft}"
+                f"[使用者需求]\n{user_query}\n\n"  # 判斷草案是否回答本輪需求
+                f"[使用者偏好檔案]\n{state.get('preferences') or '無'}\n\n"  # 判斷個人化程度
+                f"[待審核的行程草案]\n{draft}"  # Executor 最新產生的結果
             )),
         ])
 
-        # 存進 state 前轉成純 dict：Pydantic 自訂型別直接存 checkpoint
-        # 會觸發 msgpack 未註冊型別警告，只在 structured output 邊界用 Pydantic 驗證。
+        # Pydantic 物件直接進 checkpoint 會出現 msgpack 型別警告，因此先轉成一般 dict。
+        # 每執行一次 Reflect 就將 revisions 加一，讓條件邊可以限制最大審核輪次。
         return {"critique": critique.model_dump(), "revisions": state.get("revisions", 0) + 1}
 
+    # 回傳節點函式本身，main.py 之後會把它註冊到 StateGraph。
     return reflect
