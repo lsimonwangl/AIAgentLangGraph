@@ -26,7 +26,7 @@ def build_mcp_server_config() -> dict:
     MCP 是一個讓 LLM 與外部工具溝通的標準協定。
     每個 server 設定包含以下欄位：
         - command:   啟動該工具服務的執行檔（這裡用 npx 直接執行 npm 套件）
-        - args:      傳給 command 的參數；-y 表示自動同意安裝、@latest 抓最新版
+        - args:      傳給 command 的參數；-y 表示自動同意安裝，package@version 固定版本
         - env:       要傳給該服務的環境變數（例如 API 金鑰）
         - transport: Agent 與 server 之間的溝通方式，stdio 代表透過標準輸入輸出，
                      http 代表連線到遠端 server
@@ -36,17 +36,17 @@ def build_mcp_server_config() -> dict:
         # tavily：提供網路搜尋功能，讓 Agent 能查詢景點/住宿/交通即時資訊
         "tavily": {
             "command": "npx",  # 使用 npx 啟動 npm 上的 MCP Server
-            "args": ["-y", "tavily-mcp@latest"],  # 自動確認並使用最新版 tavily-mcp
+            "args": ["-y", "tavily-mcp@0.2.22"],  # 固定 Tavily MCP 版本
             "env": {"TAVILY_API_KEY": os.getenv("TAVILY_API_KEY", "")},  # 將搜尋金鑰傳給子程序
             "transport": "stdio",  # 透過標準輸入輸出與本機子程序通訊
         },
         # open-meteo：提供免費天氣查詢服務，不需 API 金鑰
         "open-meteo": {
             "command": "npx",  # 同樣使用 npx 啟動本機 MCP Server
-            "args": ["-y", "open-meteo-mcp-server"],  # 自動確認套件安裝
+            "args": ["-y", "open-meteo-mcp-server@2.0.1"],  # 固定天氣 MCP 版本
             "transport": "stdio",  # 透過標準輸入輸出通訊
         },
-        # frankfurter：提供免費匯率換算服務，走遠端 HTTP server
+        # frankfurter：使用服務方管理的遠端 HTTP MCP，程式端沒有 npm 套件版本可固定
         "frankfurter": {
             "url": "https://mcp.frankfurter.dev/",  # 官方提供的遠端 MCP 位址
             "transport": "http",  # 直接透過 HTTP 連線，不啟動本機程序
