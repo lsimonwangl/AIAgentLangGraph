@@ -3,19 +3,15 @@ Travel Agent - Executor 節點（Proactivity）
 =========================================
 executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產出每日行程草案。
 
-執行流程：
-    0. 載入套件
-    1. 建立系統提示詞，定義工具使用規則、查證原則與輸出格式
-    2. 用 create_agent 建立 ReAct agent（工具迴圈由 prebuilt agent 自己管理）
-    3. 將對話歷史、偏好檔案與執行計畫組成一次性指令餵給 agent
-    4. 只把 agent 新產生的訊息併回 state：指令不能寫進對話歷史，
-       否則會被 planner/reflect 誤認成「最後一則使用者需求」，
-       且每輪修訂都疊一份計畫文字進歷史
-
-此模組提供 create_executor() 函式供 main.py 呼叫。
+程式流程：
+  1. 建立系統提示詞，定義工具使用、資料查證與輸出規則。
+  2. 使用 create_agent 建立可自主呼叫工具的 ReAct Agent。
+  3. 將對話歷史、偏好資料與 Planner 計畫組成本輪執行指令。
+  4. 執行 Agent，取得工具訊息與完整行程草案。
+  5. 只把 Agent 新產生的訊息寫回 State，避免一次性指令污染對話歷史。
 """
 
-# 載入套件
+# ── 載入套件 ──────────────────────────────────────────────
 from datetime import date
 
 from langchain.agents import create_agent
@@ -24,6 +20,7 @@ from langchain_core.messages import HumanMessage
 from state import TravelState
 
 
+# ── Executor Prompt：工具、查證、修訂與輸出規則 ──────────
 def build_system_prompt() -> str:
     """建立系統提示詞，定義 executor 的工具規則、查證原則與輸出格式。"""
     return """\
@@ -78,14 +75,17 @@ Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open
 - 若收到修正要求，務必逐項處理問題（改數字、換地點、補備案），並在最後加「修正摘要」逐項說明「問題→如何改」。"""
 
 
+# ── 建立 Executor 節點 ────────────────────────────────────
 def create_executor(llm, tools):
     """建立 executor 節點，回傳可註冊進 StateGraph 的 async 函式。"""
-    # 組合模型、工具與系統提示詞，建立可執行的 ReAct agent
+    # 將模型、MCP 工具與系統提示詞交給 create_agent，建立會自行管理工具迴圈的 ReAct Agent。
     agent = create_agent(llm, tools, system_prompt=build_system_prompt())
 
+    # 內部 async 函式就是實際註冊到 StateGraph 的 Executor 節點。
     async def executor(state: TravelState) -> dict:
-        # 把 planner 產出的 plan 與偏好檔案組成本輪指令，連同對話歷史一起餵給 agent
+        # 將 Planner 的步驟清單加上編號，整理成適合放入 Prompt 的純文字。
         plan_text = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(state["plan"]))
+        # 建立本輪一次性指令，補充日期、偏好資料與 Planner 產生的執行計畫。
         directive = HumanMessage(content=(
             f"[今天日期] {date.today().isoformat()}（請以此推算「下週二」等相對日期，"
             "並相信天氣/匯率工具回傳的年份）\n\n"
@@ -93,11 +93,16 @@ def create_executor(llm, tools):
             f"[執行計畫]\n{plan_text}\n\n"
             "請依上述計畫與偏好檔案呼叫工具蒐集資訊，並產出完整的每日行程草案。"
         ))
+        # 複製 State 中的歷史訊息並在最後加入 directive，不直接修改原本的 messages list。
         input_messages = list(state["messages"]) + [directive]
+        # 啟動 ReAct Agent；它會依計畫自行呼叫工具，最後產生完整行程草案。
         result = await agent.ainvoke({"messages": input_messages})
 
-        # 切掉「帶入的歷史 + directive」，只把 agent 新增的 AI/Tool 訊息併回 state
+        # Agent 回傳的 messages 會包含輸入歷史，因此依輸入長度切掉原有部分。
+        # 只保留本輪新增的 AIMessage 與 ToolMessage，避免重複寫入 State。
         new_messages = result["messages"][len(input_messages):]
+        # MessagesState 會把這些新訊息附加到既有對話歷史。
         return {"messages": new_messages}
 
+    # 回傳節點函式本身，main.py 之後會把它註冊到 StateGraph。
     return executor
