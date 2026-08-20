@@ -7,8 +7,8 @@ main.py 負責把偏好檢索、四個節點與 StateGraph 串成完整旅遊規
     0. 載入環境變數並建立外部 clients
     1. 載入 executor 可以使用的 MCP 外部工具
     2. 建立可以搜尋過往旅遊紀錄的 retriever
-    3. 初始化 LLM，建立 retrieve_preferences / planner / executor / reflect 四個節點
-    4. 組裝 StateGraph（retrieve_preferences → planner → executor → reflect 審核迴圈）
+    3. 初始化 LLM，建立 retrieve_preferences / planner / executor / reviewer 四個節點
+    4. 組裝 StateGraph（retrieve_preferences → planner → executor → reviewer 審查迴圈）
     5. 啟動終端機互動介面，接收使用者多輪問題
 
 執行方式：
@@ -25,7 +25,7 @@ from graph import build_graph
 from graph.nodes import (
     create_executor,
     create_planner,
-    create_reflect,
+    create_reviewer,
     create_retrieve_preferences,
 )
 from rag import build_retriever
@@ -42,17 +42,17 @@ async def main():
     # 建立 RAG 檢索器，用來從過往旅遊紀錄找出相關偏好
     retriever = build_retriever(create_embeddings())
 
-    # 初始化 LLM，使用 NVIDIA API（OpenAI 相容）
+    # 初始化 LLM，使用本機 OpenAI-compatible CLI Proxy
     llm = create_chat_model()
 
-    # 建立四個節點：偏好前置檢索、規劃、執行、審核
+    # 建立四個節點：偏好前置檢索、規劃、執行、結果審查
     retrieve_preferences = create_retrieve_preferences(retriever)
     planner = create_planner(llm)
     executor = create_executor(llm, tools)
-    reflect = create_reflect(llm)
+    reviewer = create_reviewer(llm)
 
-    # 組裝 StateGraph，把節點串成「規劃 → 執行 → 審核」的迴圈
-    graph = build_graph(retrieve_preferences, planner, executor, reflect)
+    # 組裝 StateGraph，把節點串成「規劃 → 執行 → 審查」的迴圈
+    graph = build_graph(retrieve_preferences, planner, executor, reviewer)
 
     # 啟動終端機介面，讓使用者可以一輪一輪輸入需求
     await run_terminal_chat(graph)

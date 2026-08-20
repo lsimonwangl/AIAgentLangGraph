@@ -6,12 +6,11 @@ clients.py 集中建立聊天模型與 Embedding client；MCP 工具仍由 tools
 
 import os
 
-from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from langchain_openai import ChatOpenAI
 
 
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_LOCAL_LLM_BASE_URL = "http://127.0.0.1:8317/v1"
 
 
 def _required_env(name: str) -> str:
@@ -23,17 +22,14 @@ def _required_env(name: str) -> str:
 
 
 def create_chat_model() -> ChatOpenAI:
-    """建立供 planner、executor 與 reflect 共用的 NVIDIA 聊天模型。"""
+    """建立供 planner、executor 與 reviewer 共用的本機 Proxy 聊天模型。"""
     return ChatOpenAI(
-        base_url=NVIDIA_BASE_URL,
-        api_key=_required_env("NVIDIA_API_KEY"),
+        base_url=os.getenv("CLI_PROXY_BASE_URL", DEFAULT_LOCAL_LLM_BASE_URL),
+        api_key=os.getenv("CLI_PROXY_API_KEY", "123456"),
         model=_required_env("CHAT_MODEL"),
-        stream_chunk_timeout=300,
+        reasoning_effort="low",
+        timeout=60,
         max_retries=2,
-        rate_limiter=InMemoryRateLimiter(
-            requests_per_second=0.15,
-            max_bucket_size=1,
-        ),
     )
 
 

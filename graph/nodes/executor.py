@@ -9,7 +9,7 @@ executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產�
     2. 用 create_agent 建立 ReAct agent（工具迴圈由 prebuilt agent 自己管理）
     3. 將對話歷史、偏好檔案與執行計畫組成一次性指令餵給 agent
     4. 只把 agent 新產生的訊息併回 state：指令不能寫進對話歷史，
-       否則會被 planner/reflect 誤認成「最後一則使用者需求」，
+       否則會被 planner/reviewer 誤認成「最後一則使用者需求」，
        且每輪修訂都疊一份計畫文字進歷史
 
 此模組提供 create_executor() 函式供 main.py 呼叫。
@@ -19,7 +19,7 @@ executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產�
 from datetime import date
 
 from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from ..state import TravelState
 
@@ -45,7 +45,7 @@ Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open
 - 資訊蒐集完成後，直接產出完整的每日行程草案（不要只回工具結果）。
 
 資料正確性原則（修訂時尤其重要）：
-- 計畫裡若出現具體數字的修正要求（例如「把票價改成 X」），那是上一輪審核的轉述，「不是」最終事實。
+- 計畫裡若出現具體數字的修正要求（例如「把票價改成 X」），那是上一輪審查的轉述，「不是」最終事實。
   請你自己用工具（優先查官方網站/官方票務頁）查證後，「以官方來源為準」，不要盲目照抄計畫給的數字。
 - 同一事實若多個來源數字不同（官網 vs 比價站 vs 部落格），一律採信權威性最高者：
   官方網站／官方票務頁 > 旅遊比價站 > 個人部落格/論壇。採用官方值，並可在該行簡短註明「(官方價)」。
@@ -55,7 +55,7 @@ Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open
   當成提示帶過即可，不要在後續每輪反覆糾結同一個查不到的數字。
 
 修訂時的最小改動原則（避免越改越亂）：
-- 只動上一輪審核 issues「明確點到」的地方（改那個數字、修那段時間衝突、補那個備案）。
+- 只動上一輪審查 issues「明確點到」的地方（改那個數字、修那段時間衝突、補那個備案）。
 - 沒被點到、且上一版已經合理的行程段落，「原樣保留」，不要整天重排、不要換掉沒問題的景點，
   以免修好一處又在別處製造新的時間或動線矛盾。
 - 修正數字（門票、價格、開放時間）時「直接改原本那一行」，不要為了交代修正而「新增一行價格摘要或合計」
@@ -91,7 +91,13 @@ def create_executor(llm, tools):
             f"[執行計畫]\n{plan_text}\n\n"
             "請依上述計畫與偏好檔案呼叫工具蒐集資訊，並產出完整的每日行程草案。"
         ))
-        input_messages = list(state["messages"]) + [directive]
+        # 修訂輪只保留使用者訊息與有文字的行程草案，不重送冗長的舊 ToolMessage
+        conversation = [
+            msg for msg in state["messages"]
+            if isinstance(msg, HumanMessage)
+            or (isinstance(msg, AIMessage) and msg.content and not msg.tool_calls)
+        ]
+        input_messages = conversation + [directive]
         result = await agent.ainvoke({"messages": input_messages})
 
         # 切掉「帶入的歷史 + directive」，只把 agent 新增的 AI/Tool 訊息併回 state

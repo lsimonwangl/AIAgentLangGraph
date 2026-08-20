@@ -7,7 +7,7 @@ retrieve_preferences.py 負責在 planner 之前檢索使用者過往旅遊偏�
     0. 從對話歷史取出最新一則使用者需求
     1. 透過 build_preference_query 將需求改寫成偏好搜尋文字
     2. 用 retriever 從 Milvus 檢索相關偏好片段
-    3. 原文片段直接存入 state["preferences"]，供 planner/executor/reflect 共用
+    3. 原文片段直接存入 state["preferences"]，供 planner/executor/reviewer 共用
        （不經 LLM 摘要：原文天然就是行程說明要引用的依據，摘要反而有失真風險）
 
 此模組提供 create_retrieve_preferences() 函式供 main.py 呼叫。

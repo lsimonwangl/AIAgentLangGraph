@@ -7,12 +7,12 @@ chat.py 負責顯示啟動畫面、串流各節點執行進度，並驅動多輪
     0. 顯示啟動 banner 與範例問題
     1. 透過 read_query 接收使用者輸入
     2. 呼叫 graph.astream 串流接收節點事件（updates + messages，含子圖）
-    3. 依節點類型分別顯示偏好檢索、計畫、工具呼叫、行程草案與審核結果
+    3. 依節點類型分別顯示偏好檢索、計畫、工具呼叫、行程草案與審查結果
     4. 使用者結束輸入時印出告別訊息
 
 串流用 stream_mode=["updates","messages"] + subgraphs=True：
-    - messages：即時 token（executor 行程草案；planner/reflect 是 structured output，無文字可串）
-    - updates ：節點產出的 state 欄位（preferences / plan / critique），與子圖工具呼叫
+    - messages：即時 token（executor 行程草案；planner/reviewer 是 structured output，無文字可串）
+    - updates ：節點產出的 state 欄位（preferences / plan / review），與子圖工具呼叫
 
 此模組提供 run_terminal_chat() 函式供 main.py 呼叫。
 """
@@ -94,14 +94,14 @@ def _print_plan(output):
         print(f"  {i}. {step}")
 
 
-def _print_critique(output):
-    """審核完成：印出 verdict、修正次數與發現的問題。"""
-    critique = output.get("critique")
-    print_header("Reflect — 多面向品質檢查")
-    print('輸出欄位：state["critique"]（structured output）')
-    print(f"  verdict：{critique['verdict'] if critique else '?'}")
-    print(f"  revisions：{output.get('revisions', 0)}")
-    issues = critique["issues"] if critique else []
+def _print_review(output):
+    """審查完成：印出 verdict、審查輪數與發現的問題。"""
+    review = output.get("review")
+    print_header("Reviewer — 結果審查")
+    print('輸出欄位：state["review"]（structured output）')
+    print(f"  verdict：{review['verdict'] if review else '?'}")
+    print(f"  review_count：{output.get('review_count', 0)}")
+    issues = review["issues"] if review else []
     if issues:
         print("  issues：")
         for issue in issues:
@@ -112,7 +112,7 @@ def _print_critique(output):
 NODE_PRINTERS = {
     "retrieve_preferences": _print_preferences,
     "planner": _print_plan,
-    "reflect": _print_critique,
+    "reviewer": _print_review,
 }
 
 
@@ -134,7 +134,7 @@ def _handle_event(ns, mode, data, st: dict):
         return
 
     # ── 頂層事件 ──
-    # planner/reflect 走 structured output（function_calling），沒有逐 token 文字可串流
+    # planner/reviewer 走 structured output（function_calling），沒有逐 token 文字可串流
     if mode == "messages":
         return
 
@@ -143,6 +143,8 @@ def _handle_event(ns, mode, data, st: dict):
         printer = NODE_PRINTERS.get(node_name)
         if printer:
             printer(output)
+        if node_name == "reviewer":
+            st["last_review"] = output.get("review")
     # 任何頂層節點跑完都重置 header；executor 串流時才會重新印標題
     st["header"] = None
 
@@ -152,14 +154,14 @@ def _build_turn_payload(user_input: str) -> dict:
     return {
         "messages": [HumanMessage(content=user_input)],
         "plan": [],
-        "critique": None,
-        "revisions": 0,
+        "review": None,
+        "review_count": 0,
     }
 
 
 async def _stream_turn(graph, payload: dict, config: dict):
     """執行並顯示一輪 graph 事件。"""
-    stream_state = {"header": None}
+    stream_state = {"header": None, "last_review": None}
     async for ns, mode, data in graph.astream(
         payload,
         config,
@@ -167,6 +169,7 @@ async def _stream_turn(graph, payload: dict, config: dict):
         subgraphs=True,
     ):
         _handle_event(ns, mode, data, stream_state)
+    return stream_state["last_review"]
 
 
 async def run_terminal_chat(graph, thread_id: str = "travel-session-1"):
@@ -184,7 +187,10 @@ async def run_terminal_chat(graph, thread_id: str = "travel-session-1"):
         if not user_input:
             continue
 
-        await _stream_turn(graph, _build_turn_payload(user_input), config)
+        final_review = await _stream_turn(graph, _build_turn_payload(user_input), config)
 
-        print("\n\n✅ 本輪規劃完成\n")
+        if final_review and final_review.get("verdict") == "pass":
+            print("\n\n✅ 本輪規劃通過審查\n")
+        else:
+            print("\n\n⚠️ 已停止自動修訂，保留目前最佳版本；待確認項目請依輸出提示補充。\n")
         turn += 1

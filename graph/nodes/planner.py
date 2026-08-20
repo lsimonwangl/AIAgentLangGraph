@@ -1,13 +1,13 @@
 """
 Travel Agent - Planner 節點（Planning）
 =====================================
-planner.py 負責把使用者的旅遊需求拆解成有序的執行計畫，並依 reflect 的 critique 修訂。
+planner.py 負責把使用者的旅遊需求拆解成有序的執行計畫，並依 reviewer 的 review 修訂。
 
 執行流程：
     0. 載入套件
     1. 定義 Plan 計畫結構，用 structured output 讓 LLM 直接回傳步驟清單，免去字串解析
     2. 建立規劃提示詞，告訴 LLM 計畫該有哪些步驟、怎麼把偏好融入其中
-    3. 將對話歷史、偏好檔案與上一輪 critique 餵給 LLM 產出計畫
+    3. 將對話歷史、偏好檔案與上一輪 review 餵給 LLM 產出計畫
     4. 回傳 plan 寫入 state，交給 executor 執行
 
 此模組提供 create_planner() 函式供 main.py 呼叫。
@@ -16,7 +16,7 @@ planner.py 負責把使用者的旅遊需求拆解成有序的執行計畫，並
 # 載入套件
 from datetime import date
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from ..state import TravelState
@@ -42,7 +42,9 @@ PLAN_SYSTEM_PROMPT = """\
 （例如偏好在地文創、不愛過度觀光化商圈，步驟就寫「搜尋在地文創景點與巷弄美食，避開純觀光商圈」），
 不要寫「熱門景點」「必去景點」這類與偏好無關的通用步驟。
 
-若收到上一輪的 critique，請針對 issues 逐項調整計畫（例如預算超支就加入「改用平價住宿/景點方案」步驟，動線不順就加入「重排地理動線」步驟），不要原封不動重列。
+若收到上一輪的 review，請針對 issues 逐項調整計畫（例如預算超支就加入「改用平價住宿/景點方案」步驟，動線不順就加入「重排地理動線」步驟），不要原封不動重列。
+issue 若以「需要補查：」開頭，才安排 executor 使用現有工具補查；若資訊必須由使用者提供，
+或屬於即時航班、訂房庫存等現有工具無法可靠取得的資料，請改用合理假設並標示待確認，不要安排重複搜尋。
 
 輸出規則：
 - steps 的每個元素就是一個步驟的完整描述，不要加編號前綴
@@ -55,33 +57,39 @@ def create_planner(llm):
     plan_llm = llm.with_structured_output(Plan, method="function_calling")
 
     async def planner(state: TravelState) -> dict:
-        # 帶入上一輪 critique，讓 planner 自行診斷如何修訂計畫
-        critique = state.get("critique")
-        issues = (critique or {}).get("issues")  # critique 為 None 時當空 dict，不會爆
+        # 帶入上一輪 review，讓 planner 自行診斷如何修訂計畫
+        review = state.get("review")
+        issues = (review or {}).get("issues")
         is_revision = bool(issues)
-        critique_block = "\n".join(f"・{i}" for i in issues) if is_revision else "無（這是第一次規劃）"
+        review_block = "\n".join(f"・{i}" for i in issues) if is_revision else "無（這是第一次規劃）"
 
         # 修訂輪只列「修正步驟」，不重列天氣/匯率/景點蒐集
         task = (
-            "請只針對上方審核問題，產出「修正步驟」清單：每步對應一個 issue 寫「改什麼」。"
+            "請只針對上方審查問題，產出「修正步驟」清單：每步對應一個 issue 寫「改什麼」。"
             "天氣、匯率、以及上一版已完成的景點/住宿/交通蒐集都不要重列——"
             "executor 會保留上一版草案，只改你列出的地方。"
             if is_revision else
             "請針對上方對話中最新一則旅遊需求，產出本輪執行計畫。"
         )
 
-        # 組裝本輪規劃指令：今天日期、偏好檔案與上一輪審核問題
+        # 組裝本輪規劃指令：今天日期、偏好檔案與上一輪審查問題
         directive = HumanMessage(content=(
             f"[今天日期] {date.today().isoformat()}（規劃涉及「下週二」等相對日期時以此為準）\n\n"
             f"[使用者偏好檔案]\n{state.get('preferences') or '無'}\n\n"
-            f"[上一輪審核發現的問題]\n{critique_block}\n\n"
+            f"[上一輪審查發現的問題]\n{review_block}\n\n"
             + task
         ))
         # 依序餵入系統規則、對話歷史與本輪指令，產出結構化計畫
+        # Planner 不需要閱讀舊工具原文；只保留使用者需求與先前行程草案以控制 context
+        conversation = [
+            msg for msg in state["messages"]
+            if isinstance(msg, HumanMessage)
+            or (isinstance(msg, AIMessage) and msg.content and not msg.tool_calls)
+        ]
         plan = await plan_llm.ainvoke([
             SystemMessage(content=PLAN_SYSTEM_PROMPT),  # 系統提示詞，定義規劃規則與步驟骨架
-            *state["messages"],                          # 對話歷史，含使用者最新旅遊需求
-            directive,                                   # 本輪規劃指令：日期、偏好檔案與審核問題
+            *conversation,                               # 排除冗長 ToolMessage 的對話內容
+            directive,                                   # 本輪規劃指令：日期、偏好檔案與審查問題
         ])
         return {"plan": plan.steps}
 
