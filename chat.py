@@ -8,7 +8,8 @@ chat.py 負責顯示啟動畫面、串流各節點執行進度，並驅動多輪
   2. 從終端機接收使用者輸入。
   3. 使用 graph.astream() 接收頂層節點與 Executor 子圖事件。
   4. 依事件類型顯示偏好、計畫、工具活動、行程草案與審核結果。
-  5. 保留同一個 thread_id，持續處理多輪對話直到使用者結束。
+  5. NVIDIA API 呼叫失敗時只中止該輪，讓使用者稍後重新提問。
+  6. 保留同一個 thread_id，持續處理多輪對話直到使用者結束。
 
 串流用 stream_mode=["updates","messages"] + subgraphs=True：
     - messages：即時 token（executor 行程草案；planner/reflect 是 structured output，無文字可串）
@@ -18,6 +19,7 @@ chat.py 負責顯示啟動畫面、串流各節點執行進度，並驅動多輪
 
 # ── 載入套件 ──────────────────────────────────────────────
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from openai import APIError
 
 from prompt import read_query
 
@@ -212,14 +214,21 @@ async def run_chat(graph):
 
         # 新一輪開始前清除 Executor 標題狀態。
         stream_state["header"] = None
-        # 同時訂閱 updates 與 messages，並開啟 subgraphs 取得 Executor 內部工具事件。
-        async for ns, mode, data in graph.astream(
-            payload, config, stream_mode=["updates", "messages"], subgraphs=True
-        ):
-            # 每收到一個事件就依來源與類型立即更新終端畫面。
-            _handle_event(ns, mode, data, stream_state)
+        # 將整輪 Graph 執行包在 try/except，避免 NVIDIA API 暫時過載時終止整個程式。
+        try:
+            # 同時訂閱 updates 與 messages，並開啟 subgraphs 取得 Executor 內部工具事件。
+            async for ns, mode, data in graph.astream(
+                payload, config, stream_mode=["updates", "messages"], subgraphs=True
+            ):
+                # 每收到一個事件就依來源與類型立即更新終端畫面。
+                _handle_event(ns, mode, data, stream_state)
+        # 只捕捉模型端點回傳的 API 錯誤；其他程式錯誤仍保留 traceback，方便除錯。
+        except APIError as error:
+            print(f"\n\n⚠️ NVIDIA API 呼叫失敗，這輪規劃未完成：{error}")
+            print("   通常是端點限流或服務暫時過載，稍等一兩分鐘再重問一次即可。\n")
+        else:
+            # astream 正常結束代表本輪已通過審核或達到最大審核輪次。
+            print("\n\n✅ 本輪規劃完成\n")
 
-        # astream 正常結束代表本輪已通過審核或達到最大審核輪次。
-        print("\n\n✅ 本輪規劃完成\n")
         # 下一次輸入顯示新的輪次編號。
         turn += 1
