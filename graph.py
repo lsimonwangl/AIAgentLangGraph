@@ -13,8 +13,6 @@ graph.py 負責把四個節點組成 LangGraph 主流程，並設定審核迴圈
 # ── 載入套件 ──────────────────────────────────────────────
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import RetryPolicy
-from openai import APIError
 
 from state import TravelState
 
@@ -47,25 +45,7 @@ def build_graph(retrieve_preferences, planner, executor, reflect):
     # 將任務拆解函式註冊成 Planner 節點。
     builder.add_node("planner", planner)
     # 將工具執行函式註冊成 Executor 節點。
-    builder.add_node(
-        "executor",
-        executor,
-        # RetryPolicy 是 LangGraph 的節點重試設定；Executor 發生指定錯誤時會重新執行此節點。
-        retry_policy=RetryPolicy(
-            # max_attempts 是每次進入 Executor 節點後的最大嘗試次數，包含第一次執行與兩次重試。
-            max_attempts=3,
-            # initial_interval 是第一次重試前的等待秒數，避免立即再次呼叫過載的 API。
-            initial_interval=5.0,
-            # backoff_factor 是等待時間倍率，因此第二次重試前會等待 5 × 2 = 10 秒。
-            backoff_factor=2.0,
-            # max_interval 是單次等待秒數上限，避免後續等待時間持續增加。
-            max_interval=15.0,
-            # jitter 決定是否加入隨機等待時間；教學範例關閉後較容易觀察固定間隔。
-            jitter=False,
-            # retry_on 指定要重試的錯誤類型，只重試 OpenAI 相容端點的 API 錯誤。
-            retry_on=APIError,
-        ),
-    )
+    builder.add_node("executor", executor)
     # 將結果審核函式註冊成 Reflect 節點。
     builder.add_node("reflect", reflect)
 
