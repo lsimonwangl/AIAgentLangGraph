@@ -5,7 +5,7 @@ executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產�
 
 程式流程：
   1. 建立系統提示詞，定義工具使用、資料查證與輸出規則。
-  2. 使用 create_agent 建立可自主呼叫工具的 ReAct Agent。
+  2. 使用 create_agent 建立 ReAct Agent，並設定模型呼叫失敗時的自動重試。
   3. 將對話歷史、偏好資料與 Planner 計畫組成本輪執行指令。
   4. 執行 Agent，取得工具訊息與完整行程草案。
   5. 只把 Agent 新產生的訊息寫回 State，避免一次性指令污染對話歷史。
@@ -15,7 +15,9 @@ executor.py 負責依 planner 的計畫自主呼叫工具蒐集資訊，並產�
 from datetime import date
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import ModelRetryMiddleware
 from langchain_core.messages import HumanMessage
+from openai import APIError
 
 from state import TravelState
 
@@ -79,7 +81,30 @@ Tavily 搜尋（景點/住宿/交通/簽證即時資訊）、天氣查詢（Open
 def create_executor(llm, tools):
     """建立 executor 節點，回傳可註冊進 StateGraph 的 async 函式。"""
     # 將模型、MCP 工具與系統提示詞交給 create_agent，建立會自行管理工具迴圈的 ReAct Agent。
-    agent = create_agent(llm, tools, system_prompt=build_system_prompt())
+    agent = create_agent(
+        llm,
+        tools,
+        system_prompt=build_system_prompt(),
+        # 設定模型呼叫失敗時的重試次數、等待時間與錯誤處理方式。
+        middleware=[
+            ModelRetryMiddleware(
+                # 失敗後最多重試 2 次。
+                max_retries=2,
+                # 第一次重試前等待 5 秒。
+                initial_delay=5.0,
+                # 每次重試將等待時間乘以 2。
+                backoff_factor=2.0,
+                # 單次最多等待 15 秒。
+                max_delay=15.0,
+                # 關閉隨機延遲，方便觀察固定間隔。
+                jitter=False,
+                # 只有 API 錯誤才會重試。
+                retry_on=(APIError,),
+                # 全部失敗後將錯誤交給 chat.py 處理。
+                on_failure="error",
+            )
+        ],
+    )
 
     # 內部 async 函式就是實際註冊到 StateGraph 的 Executor 節點。
     async def executor(state: TravelState) -> dict:
